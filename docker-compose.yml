@@ -1,0 +1,16 @@
+services:
+  layer-vote-bot:
+    build:
+      context: .
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    container_name: layer-vote-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Berlin
+    volumes:
+      - ./data:/app/data
+      - /etc/localtime:/etc/localtime:ro
