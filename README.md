@@ -1,0 +1,1 @@
+# squad-event-map-layer-vote
