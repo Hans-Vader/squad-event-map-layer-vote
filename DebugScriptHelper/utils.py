@@ -154,10 +154,12 @@ def format_layer_poll_option(suggestion: dict) -> str:
     gamemode = suggestion.get("gamemode", "?")
     version = suggestion.get("layer_version", "")
     t1_faction = suggestion.get("team1_faction", "?")
+    t1_unit = suggestion.get("team1_unit", "?")
     t2_faction = suggestion.get("team2_faction", "?")
+    t2_unit = suggestion.get("team2_unit", "?")
 
     mode_str = f"{gamemode} {version}".strip() if version else gamemode
-    text = f"{map_name} {mode_str} — {t1_faction} vs {t2_faction}"
+    text = f"{map_name} {mode_str} — {t1_faction} ({t1_unit}) vs {t2_faction} ({t2_unit})"
     if len(text) > 55:
         text = text[:52] + "..."
     return text
