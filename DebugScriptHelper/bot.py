@@ -890,20 +890,15 @@ class AdminPanelView(ui.View):
         self.db_id = db_id
 
         if phase == "created":
-            self.add_item(AdminButton("open_suggestions", t("admin.open_suggestions", lang),
-                                      discord.ButtonStyle.success, "▶️"))
+            self.add_item(AdminButton("open_suggestions", t("admin.open_suggestions", lang), discord.ButtonStyle.success, "▶️"))
         elif phase == "suggestions_open":
-            self.add_item(AdminButton("close_suggestions", t("admin.close_suggestions", lang),
-                                      discord.ButtonStyle.secondary, "⏹️"))
+            self.add_item(AdminButton("close_suggestions", t("admin.close_suggestions", lang), discord.ButtonStyle.secondary, "⏹️"))
         elif phase == "suggestions_closed":
-            self.add_item(AdminButton("select_for_vote", t("admin.select_for_vote", lang),
-                                      discord.ButtonStyle.primary, "🗳️"))
+            self.add_item(AdminButton("select_for_vote", t("admin.select_for_vote", lang), discord.ButtonStyle.primary, "🗳️"))
         elif phase == "voting":
-            self.add_item(AdminButton("end_vote", t("admin.end_vote", lang),
-                                      discord.ButtonStyle.danger, "🏁"))
+            self.add_item(AdminButton("end_vote", t("admin.end_vote", lang), discord.ButtonStyle.danger, "🏁"))
 
-        self.add_item(AdminButton("delete_event", t("admin.delete_event", lang),
-                                  discord.ButtonStyle.danger, "🗑️"))
+        self.add_item(AdminButton("delete_event", t("admin.delete_event", lang), discord.ButtonStyle.danger, "🗑️"))
 
 
 class AdminButton(ui.Button):
