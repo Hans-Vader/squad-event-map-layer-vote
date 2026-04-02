@@ -924,6 +924,30 @@ class AdminButton(ui.Button):
             await admin_delete_event(interaction)
 
 
+class ConfirmActionView(ui.View):
+    """Generic confirmation dialog with Confirm and Cancel buttons."""
+
+    def __init__(self, lang: str, confirm_callback):
+        super().__init__(timeout=60)
+        self.lang = lang
+        self._confirm_callback = confirm_callback
+        self.confirm_button.label = t("general.confirm", lang)
+        self.cancel_button.label = t("general.cancel", lang)
+
+    @ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self._confirm_callback(interaction)
+
+    @ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_button(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                description=t("general.cancelled", self.lang),
+                color=discord.Color.greyple()),
+            view=None,
+        )
+
+
 async def admin_open_suggestions(interaction: discord.Interaction):
     """Open the suggestion phase."""
     lock = _get_guild_lock(interaction.guild_id)
@@ -954,7 +978,30 @@ async def admin_open_suggestions(interaction: discord.Interaction):
 
 
 async def admin_close_suggestions(interaction: discord.Interaction):
-    """Close the suggestion phase."""
+    """Show confirmation before closing the suggestion phase."""
+    settings = db.get_guild_settings(interaction.guild_id)
+    lang = settings.get("language", "en") if settings else "en"
+
+    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    if not record:
+        return
+    event = record["event"]
+    if event.get("phase") != "suggestions_open":
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("phase.not_open", lang), color=discord.Color.orange()),
+            view=None,
+        )
+        return
+
+    view = ConfirmActionView(lang, _do_close_suggestions)
+    await interaction.response.edit_message(
+        embed=discord.Embed(description=t("confirm.close_suggestions", lang), color=discord.Color.orange()),
+        view=view,
+    )
+
+
+async def _do_close_suggestions(interaction: discord.Interaction):
+    """Actually close the suggestion phase after confirmation."""
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
         record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
@@ -1103,18 +1150,28 @@ class ConfirmVoteButton(ui.Button):
             )
             return
 
-        lock = _get_guild_lock(interaction.guild_id)
-        async with lock:
-            record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
-            if not record:
-                return
-            event = record["event"]
-            event["selected_for_vote"] = selected_ids
-            event["phase"] = "voting"
-            db.save_event(record["db_id"], event)
+        captured_ids = list(selected_ids)
+        lang = self.lang
 
-        # Start the poll
-        await _start_poll(interaction, selected_ids)
+        async def _do_start_vote(confirm_interaction: discord.Interaction):
+            lock = _get_guild_lock(confirm_interaction.guild_id)
+            async with lock:
+                record = db.get_event_by_channel(confirm_interaction.guild_id, confirm_interaction.channel_id)
+                if not record:
+                    return
+                event = record["event"]
+                event["selected_for_vote"] = captured_ids
+                event["phase"] = "voting"
+                db.save_event(record["db_id"], event)
+            await _start_poll(confirm_interaction, captured_ids)
+
+        view = ConfirmActionView(lang, _do_start_vote)
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                description=t("confirm.start_vote", lang),
+                color=discord.Color.orange()),
+            view=view,
+        )
 
 
 async def _start_poll(interaction: discord.Interaction, selected_ids: list[str]):
@@ -1266,7 +1323,27 @@ async def _resolve_poll_winner(channel: discord.TextChannel, event: dict) -> Opt
 
 
 async def admin_delete_event(interaction: discord.Interaction):
-    """Delete the current event."""
+    """Show confirmation before deleting the current event."""
+    settings = db.get_guild_settings(interaction.guild_id)
+    lang = settings.get("language", "en") if settings else "en"
+
+    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    if not record:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang), color=discord.Color.red()),
+            view=None,
+        )
+        return
+
+    view = ConfirmActionView(lang, _do_delete_event)
+    await interaction.response.edit_message(
+        embed=discord.Embed(description=t("confirm.delete_event", lang), color=discord.Color.orange()),
+        view=view,
+    )
+
+
+async def _do_delete_event(interaction: discord.Interaction):
+    """Actually delete the event after confirmation."""
     settings = db.get_guild_settings(interaction.guild_id)
     lang = settings.get("language", "en") if settings else "en"
 
@@ -1807,26 +1884,22 @@ async def cmd_close_suggestions(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
+    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    if not record:
+        await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
+        return
 
-        event = record["event"]
-        if event.get("phase") != "suggestions_open":
-            await interaction.response.send_message(t("phase.not_open", lang), ephemeral=True)
-            return
+    event = record["event"]
+    if event.get("phase") != "suggestions_open":
+        await interaction.response.send_message(t("phase.not_open", lang), ephemeral=True)
+        return
 
-        event["phase"] = "suggestions_closed"
-        db.save_event(record["db_id"], event)
-
-    count = len(event.get("suggestions", []))
+    view = ConfirmActionView(lang, _do_close_suggestions)
     await interaction.response.send_message(
-        f"✅ {t('phase.suggestions_closed', lang, count=count)}", ephemeral=True)
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
-    await send_to_log_channel(f"Suggestion phase closed. {count} suggestions.", guild_id=interaction.guild_id)
+        embed=discord.Embed(description=t("confirm.close_suggestions", lang), color=discord.Color.orange()),
+        view=view,
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="start_vote", description="Start voting with selected layers")
@@ -1865,8 +1938,25 @@ async def cmd_start_vote(interaction: discord.Interaction, duration_hours: int =
                 event["voting_duration_hours"] = max(1, min(168, duration_hours))
                 db.save_event(record["db_id"], event)
 
-    await interaction.response.defer(ephemeral=True)
-    await _start_poll_from_command(interaction, selected)
+    captured_ids = list(selected)
+
+    async def _do_start(confirm_interaction: discord.Interaction):
+        lock = _get_guild_lock(confirm_interaction.guild_id)
+        async with lock:
+            rec = db.get_event_by_channel(confirm_interaction.guild_id, confirm_interaction.channel_id)
+            if not rec:
+                return
+            ev = rec["event"]
+            ev["phase"] = "voting"
+            db.save_event(rec["db_id"], ev)
+        await _start_poll(confirm_interaction, captured_ids)
+
+    view = ConfirmActionView(lang, _do_start)
+    await interaction.response.send_message(
+        embed=discord.Embed(description=t("confirm.start_vote", lang), color=discord.Color.orange()),
+        view=view,
+        ephemeral=True,
+    )
 
 
 async def _start_poll_from_command(interaction: discord.Interaction, selected_ids: list[str]):
@@ -1972,34 +2062,17 @@ async def cmd_delete_event(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
+    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    if not record:
+        await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
+        return
 
-        event = record["event"]
-        msg_id = event.get("event_message_id")
-        if msg_id:
-            try:
-                msg = await interaction.channel.fetch_message(msg_id)
-                await msg.delete()
-            except discord.NotFound:
-                pass
-
-        poll_msg_id = event.get("poll_message_id")
-        if poll_msg_id:
-            try:
-                msg = await interaction.channel.fetch_message(poll_msg_id)
-                await msg.delete()
-            except discord.NotFound:
-                pass
-
-        db.delete_event(record["db_id"])
-
-    await interaction.response.send_message(f"✅ {t('event.deleted', lang)}", ephemeral=True)
-    await send_to_log_channel("Event deleted", guild_id=interaction.guild_id)
+    view = ConfirmActionView(lang, _do_delete_event)
+    await interaction.response.send_message(
+        embed=discord.Embed(description=t("confirm.delete_event", lang), color=discord.Color.orange()),
+        view=view,
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="select_for_vote", description="Select layers for voting")

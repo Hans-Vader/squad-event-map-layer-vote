@@ -215,6 +215,20 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "The suggestion phase is not open.",
     },
 
+    # ── Confirmation ─────────────────────────────────────────────────────
+    "confirm.close_suggestions": {
+        "de": "Möchtest du die Vorschlagsphase wirklich schließen?",
+        "en": "Are you sure you want to close the suggestion phase?",
+    },
+    "confirm.delete_event": {
+        "de": "Möchtest du das Event wirklich löschen? Dies kann nicht rückgängig gemacht werden.",
+        "en": "Are you sure you want to delete the event? This cannot be undone.",
+    },
+    "confirm.start_vote": {
+        "de": "Möchtest du die Abstimmung wirklich starten?",
+        "en": "Are you sure you want to start the vote?",
+    },
+
     # ── Voting ────────────────────────────────────────────────────────────
     "vote.select_layers": {
         "de": "Wähle Layers für die Abstimmung (max {max}):",
