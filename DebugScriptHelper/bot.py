@@ -260,7 +260,7 @@ class EventActionView(ui.View):
         self.info_button.label = t("button.info", lang)
         self.admin_button.label = t("button.admin", lang)
 
-    @ui.button(label=t("button.suggest", lang), style=discord.ButtonStyle.primary,
+    @ui.button(label="Suggest Layer", style=discord.ButtonStyle.primary,
                custom_id="event_action:suggest", emoji="🗺️")
     async def suggest_button(self, interaction: discord.Interaction, button: ui.Button):
         await handle_suggest_start(interaction)
