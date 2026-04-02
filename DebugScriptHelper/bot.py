@@ -254,10 +254,13 @@ def get_unit_types_for_faction(factions: list[dict], faction_id: str,
 class EventActionView(ui.View):
     """Persistent view attached to the event embed. Buttons: Suggest, Info, Admin."""
 
-    def __init__(self):
+    def __init__(self, lang: str = "en"):
         super().__init__(timeout=None)
+        self.suggest_button.label = t("button.suggest", lang)
+        self.info_button.label = t("button.info", lang)
+        self.admin_button.label = t("button.admin", lang)
 
-    @ui.button(label="Suggest Layer", style=discord.ButtonStyle.primary,
+    @ui.button(label=t("button.suggest", lang), style=discord.ButtonStyle.primary,
                custom_id="event_action:suggest", emoji="🗺️")
     async def suggest_button(self, interaction: discord.Interaction, button: ui.Button):
         await handle_suggest_start(interaction)
@@ -1349,11 +1352,12 @@ async def _do_update_embed(guild_id: int, channel_id: int):
             return
         message = await channel.fetch_message(msg_id)
 
+        lang = settings.get("language", "en")
         phase = event.get("phase", "created")
         if phase == "completed":
             await message.edit(embed=embed, view=None)
         else:
-            await message.edit(embed=embed, view=EventActionView())
+            await message.edit(embed=embed, view=EventActionView(lang))
     except discord.NotFound:
         logger.warning(f"Event message {msg_id} not found in {channel_id}")
     except Exception as e:
@@ -1744,7 +1748,7 @@ async def cmd_create_event(interaction: discord.Interaction,
 
     # Post the event embed
     embed = build_event_embed(event_data, settings)
-    view = EventActionView()
+    view = EventActionView(lang)
     msg = await interaction.channel.send(embed=embed, view=view)
 
     # Save message ID
