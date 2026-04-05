@@ -90,10 +90,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Blacklist aktualisiert ({type}): {items}",
         "en": "Blacklist updated ({type}): {items}",
     },
-    "config.blacklist_min_maps": {
-        "de": "Es müssen mindestens 2 Maps auf der Blacklist stehen.",
-        "en": "At least 2 maps must be on the blacklist.",
-    },
     "config.suggestions_updated": {
         "de": "Vorschlags-Einstellungen aktualisiert.",
         "en": "Suggestion settings updated.",
@@ -179,6 +175,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "suggest.max_reached": {
         "de": "Du hast bereits die maximale Anzahl an Vorschlägen ({max}) erreicht.",
         "en": "You have already reached the maximum number of suggestions ({max}).",
+    },
+    "suggest.max_total_reached": {
+        "de": "Die maximale Anzahl an Vorschlägen ({max}) wurde erreicht.",
+        "en": "The maximum number of suggestions ({max}) has been reached.",
     },
     "suggest.not_open": {
         "de": "Die Vorschlagsphase ist derzeit nicht geöffnet.",

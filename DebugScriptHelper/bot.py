@@ -9,6 +9,7 @@ background tasks for scheduled events, and layer cache management.
 import asyncio
 import json
 import logging
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta
@@ -23,7 +24,7 @@ import database as db
 from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_FAST, EVENT_CRITICAL_WINDOW, LAYERS_JSON_URL, DEBUG_MODE
 from i18n import t
 from utils import (
-    has_organizer_role, is_guild_admin, check_suggest_permission,
+    has_organizer_role, is_guild_admin,
     format_layer_short, format_layer_poll_option, suggestion_matches,
     build_event_embed, build_settings_embed,
     set_log_channel, send_to_log_channel,
@@ -40,6 +41,19 @@ if DEBUG_MODE:
 if not TOKEN:
     logger.critical("DISCORD_BOT_TOKEN not set. Exiting.")
     sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# Map name overrides (shorten long names at import time)
+# ---------------------------------------------------------------------------
+_MAP_NAME_OVERRIDES = {
+    "Kamdesh Highlands": "Kamdesh",
+    "Pacific Proving Grounds": "Pacific",
+    "Tallil Outskirts": "Tallil",
+    "Sanxian Islands": "Sanxian",
+    "Lashkar Valley": "Lashkar",
+    "Logar Valley": "Logar",
+    "Sumari Bala": "Sumari"
+}
 
 # ---------------------------------------------------------------------------
 # Bot setup
@@ -123,16 +137,31 @@ async def fetch_and_cache_layers() -> int:
     layers_list = data.get("Maps", data) if isinstance(data, dict) else data
     for layer in layers_list:
         raw_name = layer.get("rawName") or layer.get("Name", "")
-        map_name = layer.get("mapName") or layer.get("Map", "")
+        map_name = _MAP_NAME_OVERRIDES.get(
+            layer.get("mapName") or layer.get("Map", ""),
+            layer.get("mapName") or layer.get("Map", ""),
+        )
         map_id = layer.get("mapId") or ""
         gamemode = layer.get("gamemode") or ""
         layer_version = layer.get("layerVersion") or None
+        # Parse version from rawName when layerVersion is missing (e.g. AlBasrah_AAS_v3_CL)
+        if not layer_version and raw_name:
+            m = re.search(r"_v(\d+)", raw_name)
+            if m:
+                layer_version = f"v{m.group(1)}"
 
         if not raw_name or not map_name or not gamemode:
             continue
 
-        # Skip training/testing maps entirely — never cache them
-        if map_id.startswith("JensensRange") or map_name.startswith("Jensen"):
+        # Skip training/testing/tutorial maps entirely — never cache them
+        if (
+            map_id.startswith("JensensRange")
+            or map_name.startswith("Jensen")
+            or "JensensRange" in map_id
+            or "Tutorial" in map_name
+            or gamemode == "Training"
+            or map_id.startswith("JesensRange")
+        ):
             continue
 
         # Extract factions with their unit types
@@ -323,11 +352,6 @@ async def handle_suggest_start(interaction: discord.Interaction):
     event = record["event"]
     if event.get("phase") != "suggestions_open":
         await interaction.response.send_message(t("suggest.not_open", lang), ephemeral=True)
-        return
-
-    # Check suggest permission
-    if not check_suggest_permission(interaction.user, settings):
-        await interaction.response.send_message(t("suggest.no_role", lang), ephemeral=True)
         return
 
     # Check max suggestions
@@ -748,6 +772,18 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
             )
             return
 
+        # Check total suggestion limit (hard cap 25 due to Discord select menu limit)
+        max_total = min(settings.get("max_total_suggestions", 25), 25)
+        if len(event.get("suggestions", [])) >= max_total:
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    description=t("suggest.max_total_reached", lang, max=max_total),
+                    color=discord.Color.red(),
+                ),
+                view=None,
+            )
+            return
+
         # Build suggestion dict
         suggestion = {
             "id": str(uuid.uuid4())[:8],
@@ -761,7 +797,7 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
             "team2_faction": state.team2_faction,
             "team2_unit": state.team2_unit,
             "raw_name": state.mode_raw_name,
-            "suggested_at": datetime.utcnow().isoformat(),
+            "suggested_at": datetime.now().isoformat(),
         }
 
         # Check duplicate in current event
@@ -1363,9 +1399,21 @@ async def _do_delete_event(interaction: discord.Interaction):
             except discord.NotFound:
                 pass
 
-        # Delete poll message if exists
+        # Delete poll message and its result message if they exist
         poll_msg_id = event.get("poll_message_id")
         if poll_msg_id:
+            # Try to delete the Discord-generated poll result message first
+            try:
+                async for msg in interaction.channel.history(
+                    after=discord.Object(id=poll_msg_id), limit=15
+                ):
+                    if msg.type.value == 46:  # MessageType.poll_result
+                        await msg.delete()
+                        break
+            except Exception:
+                pass
+
+            # Delete the poll message itself
             try:
                 msg = await interaction.channel.fetch_message(poll_msg_id)
                 await msg.delete()
@@ -1410,7 +1458,7 @@ async def _do_update_embed(guild_id: int, channel_id: int):
     if not settings:
         return
 
-    embed = build_event_embed(event, settings, user_is_admin=True)
+    embed = build_event_embed(event, settings)
     msg_id = event.get("event_message_id")
     if not msg_id:
         return
@@ -1444,27 +1492,30 @@ async def _do_update_embed(guild_id: int, channel_id: int):
 @app_commands.describe(
     organizer_role="The role that can manage events",
     log_channel="Channel for bot log messages",
-    language="Bot language (en/de)",
+    language="Bot language",
 )
+@app_commands.choices(language=[
+    app_commands.Choice(name="English", value="en"),
+    app_commands.Choice(name="Deutsch", value="de"),
+])
 async def cmd_setup(interaction: discord.Interaction, organizer_role: discord.Role,
-                    log_channel: discord.TextChannel, language: str = "en"):
+                    log_channel: discord.TextChannel,
+                    language: app_commands.Choice[str] = None):
     if not await check_admin(interaction):
         return
 
-    if language not in ("en", "de"):
-        language = "en"
+    lang_value = language.value if language else "en"
 
     settings = db.get_guild_settings(interaction.guild_id) or dict(db.DEFAULT_GUILD_SETTINGS)
     settings["organizer_role_id"] = organizer_role.id
     settings["log_channel_id"] = log_channel.id
-    settings["language"] = language
+    settings["language"] = lang_value
     db.save_guild_settings(interaction.guild_id, settings)
 
     set_log_channel(interaction.guild_id, log_channel)
 
-    lang = language
-    msg = t("setup.welcome", lang, role=organizer_role.mention,
-            channel=log_channel.mention, language=lang.upper())
+    msg = t("setup.welcome", lang_value, role=organizer_role.mention,
+            channel=log_channel.mention, language=lang_value.upper())
     await interaction.response.send_message(msg, ephemeral=True)
     await send_to_log_channel(f"Server setup by {interaction.user.display_name}", guild_id=interaction.guild_id)
 
@@ -1502,6 +1553,11 @@ async def cmd_set_language(interaction: discord.Interaction, language: app_comma
     db.save_guild_settings(interaction.guild_id, settings)
     await interaction.response.send_message(
         t("setup.language_updated", language.value, language=language.value.upper()), ephemeral=True)
+
+    # Refresh all active event embeds in this guild so the language change takes effect
+    for ev in db.get_all_active_events_global():
+        if ev["guild_id"] == interaction.guild_id:
+            await _update_event_embed(ev["guild_id"], ev["channel_id"])
 
 
 @bot.tree.command(name="set_log_channel", description="Change the log channel")
@@ -1669,14 +1725,6 @@ class BlacklistSelect(ui.Select):
 
         new_values = list(self.values)
 
-        # Enforce minimum 2 maps on blacklist
-        if self.settings_key == "blacklisted_maps" and len(new_values) < 2:
-            await interaction.response.edit_message(
-                content=t("config.blacklist_min_maps", self.lang),
-                view=None,
-            )
-            return
-
         settings[self.settings_key] = new_values
         db.save_guild_settings(interaction.guild_id, settings)
         await interaction.response.edit_message(
@@ -1689,13 +1737,13 @@ class BlacklistSelect(ui.Select):
 @bot.tree.command(name="config_suggestions", description="Configure suggestion settings")
 @app_commands.describe(
     max_per_user="Maximum suggestions per user (1-10)",
+    max_total="Maximum total suggestions across all users (1-25)",
     history_lookback="Block suggestions from last N events (0 to disable)",
-    visible="Whether suggestions are visible to non-admins",
 )
 async def cmd_config_suggestions(interaction: discord.Interaction,
                                  max_per_user: int = None,
-                                 history_lookback: int = None,
-                                 visible: bool = None):
+                                 max_total: int = None,
+                                 history_lookback: int = None):
     settings = await check_guild_configured(interaction)
     if not settings:
         return
@@ -1706,47 +1754,13 @@ async def cmd_config_suggestions(interaction: discord.Interaction,
 
     if max_per_user is not None:
         settings["max_suggestions_per_user"] = max(1, min(10, max_per_user))
+    if max_total is not None:
+        settings["max_total_suggestions"] = max(1, min(25, max_total))
     if history_lookback is not None:
         settings["history_lookback_events"] = max(0, min(50, history_lookback))
-    if visible is not None:
-        settings["suggestions_visible"] = visible
 
     db.save_guild_settings(interaction.guild_id, settings)
     await interaction.response.send_message(t("config.suggestions_updated", lang), ephemeral=True)
-
-
-@bot.tree.command(name="config_roles", description="Configure suggest/vote role gates")
-@app_commands.describe(
-    gate_type="Which gate to configure",
-    role1="Role to add",
-    role2="Optional second role",
-    role3="Optional third role",
-)
-@app_commands.choices(gate_type=[
-    app_commands.Choice(name="Suggest Roles", value="suggest"),
-    app_commands.Choice(name="Vote Roles", value="vote"),
-])
-async def cmd_config_roles(interaction: discord.Interaction,
-                           gate_type: app_commands.Choice[str],
-                           role1: discord.Role = None,
-                           role2: discord.Role = None,
-                           role3: discord.Role = None):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-    roles = [r for r in [role1, role2, role3] if r is not None]
-    role_ids = [r.id for r in roles]
-
-    key = f"{gate_type.value}_role_ids"
-    settings[key] = role_ids
-    db.save_guild_settings(interaction.guild_id, settings)
-
-    await interaction.response.send_message(
-        t("config.roles_updated", lang, type=gate_type.value), ephemeral=True)
 
 
 @bot.tree.command(name="refresh_layers", description="Re-fetch layer data from GitHub")
@@ -1773,7 +1787,7 @@ async def cmd_refresh_layers(interaction: discord.Interaction):
 # SLASH COMMANDS — Event Management
 # ═══════════════════════════════════════════════════════════════════════════
 
-@bot.tree.command(name="create_event", description="Create a new layer vote event in this channel")
+@bot.tree.command(name="create_layer_suggestion", description="Create a new layer vote event in this channel")
 @app_commands.describe(
     suggestion_start="When to auto-open suggestions (DD.MM.YYYY HH:MM) or leave empty for manual",
     voting_duration_hours="How long the vote lasts in hours (default 24)",
@@ -2164,7 +2178,7 @@ async def check_events_loop():
 
         try:
             events = db.get_all_active_events_global()
-            now = datetime.utcnow()
+            now = datetime.now()
 
             for record in events:
                 event = record["event"]
@@ -2258,8 +2272,14 @@ async def on_ready():
         except Exception as e:
             logger.error(f"Failed to fetch layers on startup: {e}")
 
-    # Start background loop
-    bot.loop.create_task(check_events_loop())
+    # Notify all configured log channels that the bot is online
+    for guild in bot.guilds:
+        await send_to_log_channel(f"Layer Vote Bot connected as {bot.user}", guild_id=guild.id)
+
+    # Start background loop (only once, even if on_ready fires again on reconnect)
+    if not getattr(bot, "_background_loop_started", False):
+        bot._background_loop_started = True
+        bot.loop.create_task(check_events_loop())
 
 
 # ═══════════════════════════════════════════════════════════════════════════

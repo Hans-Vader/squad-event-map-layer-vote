@@ -83,50 +83,6 @@ def is_guild_admin(user) -> bool:
     return False
 
 
-def check_suggest_permission(user, settings: dict) -> bool:
-    """Check if user is allowed to suggest layers based on role/user gates.
-
-    If no gates are configured, anyone can suggest.
-    """
-    role_ids = settings.get("suggest_role_ids", [])
-    user_ids = settings.get("suggest_user_ids", [])
-
-    if not role_ids and not user_ids:
-        return True
-
-    if str(user.id) in ADMIN_IDS:
-        return True
-    if str(user.id) in [str(uid) for uid in user_ids]:
-        return True
-    if hasattr(user, "roles"):
-        user_role_ids = {role.id for role in user.roles}
-        if user_role_ids & set(role_ids):
-            return True
-    return False
-
-
-def check_vote_permission(user, settings: dict) -> bool:
-    """Check if user is allowed to vote based on role/user gates.
-
-    If no gates are configured, anyone can vote.
-    """
-    role_ids = settings.get("vote_role_ids", [])
-    user_ids = settings.get("vote_user_ids", [])
-
-    if not role_ids and not user_ids:
-        return True
-
-    if str(user.id) in ADMIN_IDS:
-        return True
-    if str(user.id) in [str(uid) for uid in user_ids]:
-        return True
-    if hasattr(user, "roles"):
-        user_role_ids = {role.id for role in user.roles}
-        if user_role_ids & set(role_ids):
-            return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Layer formatting
 # ---------------------------------------------------------------------------
@@ -148,8 +104,11 @@ def format_layer_short(suggestion: dict) -> str:
     return f"{map_name} {mode_str} — {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit}"
 
 
-def format_layer_poll_option(suggestion: dict) -> str:
-    """Format a layer for use in a Discord poll option (max 55 chars for poll answers)."""
+def format_suggestion_entry(index: int, suggestion: dict) -> str:
+    """Format a suggestion as a single-line embed entry.
+
+    Example: 🗺️ **1. Al Basrah** — AAS v1 ⚔️ USMC/CombinedArms vs RGF/Mechanized • UserName
+    """
     map_name = suggestion.get("map_name", "?")
     gamemode = suggestion.get("gamemode", "?")
     version = suggestion.get("layer_version", "")
@@ -157,8 +116,42 @@ def format_layer_poll_option(suggestion: dict) -> str:
     t1_unit = suggestion.get("team1_unit", "?")
     t2_faction = suggestion.get("team2_faction", "?")
     t2_unit = suggestion.get("team2_unit", "?")
+    user_name = suggestion.get("user_name", "?")
 
     mode_str = f"{gamemode} {version}".strip() if version else gamemode
+    return (
+        f"🗺️ **{index}. {map_name}**: {mode_str} "
+        f"⚔️ {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit} • {user_name}"
+    )
+
+
+_GAMEMODE_ABBREV = {
+    "TerritoryControl": "TC",
+    "Invasion": "INV",
+}
+
+_MAP_NAME_ABBREV = {
+    "Kamdesh Highlands": "Kamdesh",
+    "Pacific Proving Grounds": "Pacific",
+}
+
+_UNIT_ABBREV = {
+    "LightInfantry": "LightInf",
+}
+
+
+def format_layer_poll_option(suggestion: dict) -> str:
+    """Format a layer for use in a Discord poll option (max 55 chars for poll answers)."""
+    map_name = _MAP_NAME_ABBREV.get(suggestion.get("map_name", "?"), suggestion.get("map_name", "?"))
+    gamemode = suggestion.get("gamemode", "?")
+    version = suggestion.get("layer_version", "")
+    t1_faction = suggestion.get("team1_faction", "?")
+    t1_unit = _UNIT_ABBREV.get(suggestion.get("team1_unit", "?"), suggestion.get("team1_unit", "?"))
+    t2_faction = suggestion.get("team2_faction", "?")
+    t2_unit = _UNIT_ABBREV.get(suggestion.get("team2_unit", "?"), suggestion.get("team2_unit", "?"))
+
+    gm_short = _GAMEMODE_ABBREV.get(gamemode, gamemode)
+    mode_str = f"{gm_short} {version}".strip() if version else gm_short
     text = f"{map_name} {mode_str} — {t1_faction} ({t1_unit}) vs {t2_faction} ({t2_unit})"
     if len(text) > 55:
         text = text[:52] + "..."
@@ -176,7 +169,17 @@ def suggestion_matches(s1: dict, s2: dict) -> bool:
 # Embed builders
 # ---------------------------------------------------------------------------
 
-def build_event_embed(event: dict, settings: dict, user_is_admin: bool = False) -> Embed:
+def _embed_total_chars(embed: Embed) -> int:
+    """Return total character count of an embed (Discord limit: 6000)."""
+    total = len(embed.title or "") + len(embed.description or "")
+    total += len(embed.footer.text) if embed.footer else 0
+    total += len(embed.author.name) if embed.author else 0
+    for field in embed.fields:
+        total += len(field.name or "") + len(field.value or "")
+    return total
+
+
+def build_event_embed(event: dict, settings: dict) -> Embed:
     """Build the main event embed displayed in the channel."""
     phase = event.get("phase", "created")
     lang = settings.get("language", "en")
@@ -225,33 +228,65 @@ def build_event_embed(event: dict, settings: dict, user_is_admin: bool = False) 
 
     # Suggestions
     suggestions = event.get("suggestions", [])
-    visible = settings.get("suggestions_visible", True)
 
     if phase in ("suggestions_open", "suggestions_closed", "voting"):
+        header = f"📋 {t('embed.suggestions_header', lang)} ({len(suggestions)})"
         if suggestions:
-            if visible or user_is_admin:
-                lines = []
-                for i, s in enumerate(suggestions, 1):
-                    user_name = s.get("user_name", "?")
-                    layer_str = format_layer_short(s)
-                    lines.append(f"{i}. {layer_str} (by {user_name})")
-                value = "\n".join(lines)
-                if len(value) > 1024:
-                    value = "\n".join(lines[:15]) + f"\n... and {len(lines) - 15} more"
-                embed.add_field(
-                    name=f"{t('embed.suggestions_header', lang)} ({len(suggestions)})",
-                    value=value,
-                    inline=False,
-                )
-            else:
-                embed.add_field(
-                    name=t("embed.suggestions_header", lang),
-                    value=t("embed.suggestions_hidden", lang, count=len(suggestions)),
-                    inline=False,
-                )
+            entries = [format_suggestion_entry(i, s) for i, s in enumerate(suggestions, 1)]
+
+            # Split entries across multiple fields (each ≤1024 chars)
+            fields: list[str] = []
+            current_chunk: list[str] = []
+            current_len = 0
+            for entry in entries:
+                line_len = len(entry) + (1 if current_chunk else 0)  # +1 for \n
+                if current_chunk and current_len + line_len > 1024:
+                    fields.append("\n".join(current_chunk))
+                    current_chunk = [entry]
+                    current_len = len(entry)
+                else:
+                    current_chunk.append(entry)
+                    current_len += line_len
+            if current_chunk:
+                fields.append("\n".join(current_chunk))
+
+            # Add fields — first gets the header, continuations use zero-width space
+            for idx, field_value in enumerate(fields):
+                name = header if idx == 0 else "\u200b"
+                embed.add_field(name=name, value=field_value, inline=False)
+
+            # Trim entries only if total embed exceeds 6000 chars
+            while _embed_total_chars(embed) > 6000 and len(entries) > 1:
+                entries.pop()
+                remaining = len(suggestions) - len(entries)
+
+                # Rebuild fields from trimmed entries
+                fields = []
+                current_chunk = []
+                current_len = 0
+                for entry in entries:
+                    line_len = len(entry) + (1 if current_chunk else 0)
+                    if current_chunk and current_len + line_len > 1024:
+                        fields.append("\n".join(current_chunk))
+                        current_chunk = [entry]
+                        current_len = len(entry)
+                    else:
+                        current_chunk.append(entry)
+                        current_len += line_len
+                if current_chunk:
+                    last = "\n".join(current_chunk)
+                    last += f"\n... and {remaining} more"
+                    fields.append(last)
+
+                # Replace suggestion fields in embed
+                embed.clear_fields()
+                embed.add_field(name=t("embed.status", lang), value=status_text, inline=False)
+                for idx, field_value in enumerate(fields):
+                    name = header if idx == 0 else "\u200b"
+                    embed.add_field(name=name, value=field_value, inline=False)
         else:
             embed.add_field(
-                name=t("embed.suggestions_header", lang),
+                name=f"📋 {t('embed.suggestions_header', lang)}",
                 value=t("embed.no_suggestions", lang),
                 inline=False,
             )
@@ -260,9 +295,23 @@ def build_event_embed(event: dict, settings: dict, user_is_admin: bool = False) 
     if phase == "completed":
         winner = event.get("winning_layer")
         if winner:
+            map_name = winner.get("map_name", "?")
+            gamemode = winner.get("gamemode", "?")
+            version = winner.get("layer_version", "")
+            t1 = winner.get("team1_faction", "?")
+            t1u = winner.get("team1_unit", "?")
+            t2 = winner.get("team2_faction", "?")
+            t2u = winner.get("team2_unit", "?")
+
+            mode_str = f"{gamemode} {version}".strip() if version else gamemode
+            winner_text = (
+                f"🗺️ **{map_name}** — {mode_str}\n"
+                f"⚔️ {t1}/{t1u} vs {t2}/{t2u}"
+            )
+
             embed.add_field(
-                name=t("embed.winner_header", lang),
-                value=format_layer_short(winner),
+                name=f"🏆 {t('embed.winner_header', lang)}",
+                value=winner_text,
                 inline=False,
             )
 
@@ -330,28 +379,6 @@ def build_settings_embed(settings: dict, guild: discord.Guild, layer_count: int)
         value=str(settings.get("history_lookback_events", 3)),
         inline=True,
     )
-    embed.add_field(
-        name=t("settings.suggestions_visible", lang),
-        value="✅" if settings.get("suggestions_visible", True) else "❌",
-        inline=True,
-    )
-
-    # Suggest roles
-    sr_ids = settings.get("suggest_role_ids", [])
-    su_ids = settings.get("suggest_user_ids", [])
-    sr_text = ", ".join(f"<@&{r}>" for r in sr_ids) if sr_ids else ""
-    su_text = ", ".join(f"<@{u}>" for u in su_ids) if su_ids else ""
-    combined = ", ".join(filter(None, [sr_text, su_text])) or "Everyone"
-    embed.add_field(name=t("settings.suggest_roles", lang), value=combined, inline=False)
-
-    # Vote roles
-    vr_ids = settings.get("vote_role_ids", [])
-    vu_ids = settings.get("vote_user_ids", [])
-    vr_text = ", ".join(f"<@&{r}>" for r in vr_ids) if vr_ids else ""
-    vu_text = ", ".join(f"<@{u}>" for u in vu_ids) if vu_ids else ""
-    combined_v = ", ".join(filter(None, [vr_text, vu_text])) or "Everyone"
-    embed.add_field(name=t("settings.vote_roles", lang), value=combined_v, inline=False)
-
     embed.add_field(
         name=t("settings.layer_cache", lang),
         value=str(layer_count),

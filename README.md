@@ -10,14 +10,12 @@ A Discord bot for collecting Squad layer suggestions from users and running vote
 - **Configurable Gamemodes**: Admin selects which gamemodes are available (AAS, RAAS, Invasion, TC, Destruction, Insurgency)
 - **Discord Native Polls**: Voting uses Discord's built-in poll system (max 10 options)
 - **History Blocking**: Prevents re-suggesting layers from recent events
-- **Role Gates**: Separate role/user gates for suggesting and voting
-- **Visibility Control**: Admin can hide suggestions from non-admin users
 - **Multi-Language**: English and German (i18n)
 - **Persistent Embeds**: Buttons survive bot restarts
 
 ## Event Cycle
 
-1. Admin creates event (`/create_event`)
+1. Admin creates event (`/create_layer_suggestion`)
 2. Suggestion phase opens (scheduled or manual via `/open_suggestions`)
 3. Users suggest layers by clicking "Suggest Layer" button
 4. Admin closes suggestions (`/close_suggestions`)
@@ -44,16 +42,15 @@ A Discord bot for collecting Squad layer suggestions from users and running vote
 | Command | Description |
 |---------|-------------|
 | `/config_gamemodes` | Select which gamemodes are available for suggestions |
-| `/config_blacklist` | Manage blacklists (maps, factions, unit types) |
-| `/config_suggestions` | Set max suggestions per user, history lookback, visibility |
-| `/config_roles` | Set suggest/vote role gates |
+| `/config_blacklist` | Manage blacklists (maps, gamemodes, factions, unit types) |
+| `/config_suggestions` | Set max suggestions per user/total, history lookback |
 | `/refresh_layers` | Re-fetch layer data from GitHub |
 
 ### Event Management (Organizer)
 
 | Command | Description |
 |---------|-------------|
-| `/create_event` | Create a new layer vote event in the channel |
+| `/create_layer_suggestion` | Create a new layer vote event in the channel |
 | `/open_suggestions` | Manually open the suggestion phase |
 | `/close_suggestions` | Close the suggestion phase |
 | `/select_for_vote` | Select layers for voting (manual or random) |
@@ -101,7 +98,7 @@ python bot.py
 2. Run `/refresh_layers` to populate the layer cache (auto-fetched on first start)
 3. Optionally configure blacklists with `/config_blacklist`
 4. Optionally configure allowed gamemodes with `/config_gamemodes`
-5. Create an event with `/create_event`
+5. Create an event with `/create_layer_suggestion`
 
 ## Configuration
 
@@ -124,14 +121,12 @@ python bot.py
 | Log Channel | — | Required during `/setup` |
 | Language | en | en or de |
 | Allowed Gamemodes | AAS, RAAS, Invasion, TC, Destruction, Insurgency | Which modes appear in suggestions |
-| Blacklisted Maps | PacificProvingGrounds, JensensRange | Minimum 2 required |
+| Blacklisted Maps | — | Jensen's Range, Tutorial, and Training maps are excluded at import |
 | Blacklisted Factions | — | Factions excluded from suggestions |
 | Blacklisted Units | — | Unit types excluded from suggestions |
 | Max Suggestions/User | 2 | 1-10 |
+| Max Total Suggestions | 25 | 1-25 (hard cap due to Discord dropdown limit) |
 | History Lookback | 3 | Block layers from last N events |
-| Suggestions Visible | Yes | Non-admins can see suggestion list |
-| Suggest Roles | Everyone | Roles/users allowed to suggest |
-| Vote Roles | Everyone | Roles/users allowed to vote |
 
 ## Data Structure
 
@@ -163,7 +158,7 @@ squad-event-map-layer-vote/
 │   ├── config.py           # .env loading, constants
 │   ├── database.py         # SQLite with JSON blobs
 │   ├── i18n.py             # Translation strings (de/en)
-│   └── utils.py            # Permission checks, embed builders
+│   └── utils.py            # Embed builders, formatting helpers
 ├── data/                   # SQLite DB (Docker volume)
 ├── Dockerfile
 ├── docker-compose.yml

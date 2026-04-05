@@ -56,17 +56,13 @@ DEFAULT_GUILD_SETTINGS = {
     "log_channel_id": None,
     "language": "en",
     "allowed_gamemodes": ["AAS", "RAAS", "Invasion", "TerritoryControl", "Destruction", "Insurgency"],
-    "blacklisted_maps": ["PacificProvingGrounds", "JensensRange"],
+    "blacklisted_maps": [],
     "blacklisted_gamemodes": [],
     "blacklisted_factions": [],
     "blacklisted_units": [],
     "max_suggestions_per_user": 2,
+    "max_total_suggestions": 25,
     "history_lookback_events": 3,
-    "suggestions_visible": True,
-    "suggest_role_ids": [],
-    "suggest_user_ids": [],
-    "vote_role_ids": [],
-    "vote_user_ids": [],
 }
 
 

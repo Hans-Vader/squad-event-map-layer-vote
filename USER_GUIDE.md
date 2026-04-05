@@ -12,7 +12,7 @@
    - **Step 3**: Select Team 1 faction and unit type
    - **Step 4**: Select Team 2 faction and unit type
    - **Step 5**: Confirm your suggestion
-4. Your suggestion appears in the event embed (if visible)
+4. Your suggestion appears in the event embed
 
 ### Viewing Your Suggestions
 
@@ -46,18 +46,16 @@ Use `/history` to see the winners of previous events.
 | Command | What it does |
 |---------|-------------|
 | `/config_gamemodes` | Choose which game modes are available (AAS, RAAS, etc.) |
-| `/config_blacklist maps` | Block maps from being suggested (min. 2 required) |
+| `/config_blacklist maps` | Block maps from being suggested |
 | `/config_blacklist factions` | Block factions from being suggested |
 | `/config_blacklist units` | Block unit types from being suggested |
-| `/config_suggestions` | Set max suggestions per user, history blocking, visibility |
-| `/config_roles suggest` | Set which roles can suggest layers |
-| `/config_roles vote` | Set which roles can vote |
+| `/config_suggestions` | Set max suggestions per user/total, history blocking |
 
 ### Running an Event
 
 **Step 1: Create**
 ```
-/create_event
+/create_layer_suggestion
   suggestion_start: 05.04.2026 18:00    (optional — auto-opens at this time)
   voting_duration_hours: 24              (optional — how long the poll runs)
 ```
@@ -116,5 +114,5 @@ A: Yes, one event per channel.
 **Q: How does history blocking work?**
 A: If a layer was suggested in one of the last N events (configurable), it cannot be suggested again. The exact combination (map + mode + factions + units) must match.
 
-**Q: What maps are blacklisted by default?**
-A: PacificProvingGrounds and JensensRange. You must always have at least 2 maps on the blacklist.
+**Q: What maps are excluded by default?**
+A: Jensen's Range, Tutorial, and Training maps are automatically excluded during layer import and never appear in suggestions.
