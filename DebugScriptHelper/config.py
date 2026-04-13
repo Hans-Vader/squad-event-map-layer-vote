@@ -47,5 +47,8 @@ LAYERS_JSON_URL = os.getenv(
     "https://raw.githubusercontent.com/fantinodavide/SquadLayerList/refs/heads/main/layers.json",
 )
 
+# ── SquadCalc link in embeds ──────────────────────────────────────────────
+SQUADCALC_BASE_URL = os.getenv("SQUADCALC_BASE_URL", "").rstrip("/")
+
 # ── Debug mode ────────────────────────────────────────────────────────────
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"

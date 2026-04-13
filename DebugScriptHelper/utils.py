@@ -8,12 +8,13 @@ Permission checks, embed builders, layer formatting helpers.
 import logging
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlencode
 
 import discord
 from discord import Embed
 
 from i18n import t
-from config import ADMIN_IDS
+from config import ADMIN_IDS, SQUADCALC_BASE_URL
 
 logger = logging.getLogger("layer_vote")
 
@@ -104,6 +105,40 @@ def format_layer_short(suggestion: dict) -> str:
     return f"{map_name} {mode_str} — {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit}"
 
 
+def build_squadcalc_url(suggestion: dict) -> Optional[str]:
+    """Build a SquadCalc URL for the given suggestion, or None if disabled."""
+    if not SQUADCALC_BASE_URL:
+        return None
+
+    map_name = suggestion.get("map_name", "")
+    if not map_name:
+        return None
+
+    sc_map = map_name.replace(" ", "").replace("'", "")
+
+    gamemode = suggestion.get("gamemode", "")
+    version = suggestion.get("layer_version", "")
+    sc_layer = f"{gamemode}{version}" if version else gamemode
+
+    params = {"map": sc_map, "layer": sc_layer}
+
+    t1 = suggestion.get("team1_faction")
+    t2 = suggestion.get("team2_faction")
+    if t1:
+        params["team1"] = t1
+    if t2:
+        params["team2"] = t2
+
+    t1u = suggestion.get("team1_unit")
+    t2u = suggestion.get("team2_unit")
+    if t1u and t1u != "Default":
+        params["team1unit"] = t1u
+    if t2u and t2u != "Default":
+        params["team2unit"] = t2u
+
+    return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
+
+
 def format_suggestion_entry(index: int, suggestion: dict) -> str:
     """Format a suggestion as a single-line embed entry.
 
@@ -119,8 +154,12 @@ def format_suggestion_entry(index: int, suggestion: dict) -> str:
     user_name = suggestion.get("user_name", "?")
 
     mode_str = f"{gamemode} {version}".strip() if version else gamemode
+
+    url = build_squadcalc_url(suggestion)
+    map_icon = f"[🗺️]({url})" if url else "🗺️"
+
     return (
-        f"🗺️ **{index}. {map_name}**: {mode_str} "
+        f"{map_icon} **{index}. {map_name}**: {mode_str} "
         f"⚔️ {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit} • {user_name}"
     )
 
@@ -304,8 +343,12 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
             t2u = winner.get("team2_unit", "?")
 
             mode_str = f"{gamemode} {version}".strip() if version else gamemode
+
+            url = build_squadcalc_url(winner)
+            map_icon = f"[🗺️]({url})" if url else "🗺️"
+
             winner_text = (
-                f"🗺️ **{map_name}** — {mode_str}\n"
+                f"{map_icon} **{map_name}** — {mode_str}\n"
                 f"⚔️ {t1}/{t1u} vs {t2}/{t2u}"
             )
 
