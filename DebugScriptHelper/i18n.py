@@ -337,8 +337,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Winner",
     },
     "embed.footer": {
-        "de": "Layer Vote Bot",
-        "en": "Layer Vote Bot",
+        "de": "Klick auf die Karte --> 🗺 <--",
+        "en": "Click on the map --> 🗺 <--",
     },
 
     # ── Buttons ───────────────────────────────────────────────────────────
