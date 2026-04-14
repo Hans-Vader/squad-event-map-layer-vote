@@ -337,8 +337,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Winner",
     },
     "embed.footer": {
-        "de": "Klick auf die Karte --> 🗺 <--",
-        "en": "Click on the map --> 🗺 <--",
+        "de": "Klick auf die Karte --> 🗺 um SquadCalc zu öffnen",
+        "en": "Click on the map --> 🗺 to open SquadCalc",
     },
 
     # ── Buttons ───────────────────────────────────────────────────────────
