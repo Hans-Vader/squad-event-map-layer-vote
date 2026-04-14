@@ -144,13 +144,16 @@ def format_suggestion_entry(index: int, suggestion: dict) -> str:
 
     Example: 🗺️ **1. Al Basrah** — AAS v1 ⚔️ USMC/CombinedArms vs RGF/Mechanized • UserName
     """
-    map_name = suggestion.get("map_name", "?")
     gamemode = suggestion.get("gamemode", "?")
-    version = suggestion.get("layer_version", "")
+    gm_short = _GAMEMODE_ABBREV.get(gamemode, gamemode)
+
+    map_name = _MAP_NAME_ABBREV.get(suggestion.get("map_name", "?"), suggestion.get("map_name", "?"))
     t1_faction = suggestion.get("team1_faction", "?")
-    t1_unit = suggestion.get("team1_unit", "?")
+    t1_unit = _UNIT_ABBREV.get(suggestion.get("team1_unit", "?"), suggestion.get("team1_unit", "?"))
     t2_faction = suggestion.get("team2_faction", "?")
-    t2_unit = suggestion.get("team2_unit", "?")
+    t2_unit = _UNIT_ABBREV.get(suggestion.get("team2_unit", "?"), suggestion.get("team2_unit", "?"))
+
+    version = suggestion.get("layer_version", "")
     user_name = suggestion.get("user_name", "?")
 
     mode_str = f"{gamemode} {version}".strip() if version else gamemode
