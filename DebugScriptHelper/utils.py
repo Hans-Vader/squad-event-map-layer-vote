@@ -156,7 +156,7 @@ def format_suggestion_entry(index: int, suggestion: dict) -> str:
     version = suggestion.get("layer_version", "")
     user_name = suggestion.get("user_name", "?")
 
-    mode_str = f"{gamemode} {version}".strip() if version else gamemode
+    mode_str = f"{gm_short} {version}".strip() if version else gm_short
 
     url = build_squadcalc_url(suggestion)
     map_icon = f"[🗺️]({url})" if url else "🗺️"
