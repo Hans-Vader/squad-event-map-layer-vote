@@ -132,9 +132,9 @@ def build_squadcalc_url(suggestion: dict) -> Optional[str]:
     t1u = suggestion.get("team1_unit")
     t2u = suggestion.get("team2_unit")
     if t1u and t1u != "Default":
-        params["team1unit"] = t1u
+        params["team1unit"] = t1 + "_LO_" + t1u
     if t2u and t2u != "Default":
-        params["team2unit"] = t2u
+        params["team2unit"] = t2 + "_LO_" + t2u
 
     return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
 
