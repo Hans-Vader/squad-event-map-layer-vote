@@ -34,8 +34,14 @@ def get_log_channel(guild_id: int) -> Optional[discord.TextChannel]:
 
 
 async def send_to_log_channel(message: str, guild: discord.Guild = None,
-                              guild_id: int = None, level: str = "INFO"):
-    """Send a formatted message to the guild's log channel."""
+                              guild_id: int = None, level: str = "INFO",
+                              mention_role_id: int = 0):
+    """Send a formatted message to the guild's log channel.
+
+    When `mention_role_id` is given and non-zero, the role is pinged via
+    `AllowedMentions(roles=True)` — used when organizers need to act (e.g.
+    too many suggestions to auto-start voting).
+    """
     gid = guild_id or (guild.id if guild else None)
     if not gid:
         return False
@@ -53,7 +59,13 @@ async def send_to_log_channel(message: str, guild: discord.Guild = None,
     formatted = f"{icon} **{label}**: {message}"
 
     try:
-        await channel.send(formatted)
+        if mention_role_id:
+            await channel.send(
+                formatted,
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
+        else:
+            await channel.send(formatted)
         return True
     except Exception as e:
         logger.error(f"Failed to send to log channel: {e}")
@@ -259,7 +271,12 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
         else:
             status_text = t("embed.status_created_manual", lang)
     elif phase == "suggestions_open":
-        status_text = t("embed.status_suggestions_open", lang)
+        end_time = event.get("suggestion_end_time")
+        if end_time and isinstance(end_time, datetime):
+            ts = int(end_time.timestamp())
+            status_text = t("embed.status_suggestions_open_until", lang, ts=ts)
+        else:
+            status_text = t("embed.status_suggestions_open", lang)
     elif phase == "suggestions_closed":
         count = len(event.get("suggestions", []))
         status_text = t("embed.status_suggestions_closed", lang, count=count)
@@ -365,7 +382,14 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
                 inline=False,
             )
 
-    embed.set_footer(text=t("embed.footer", lang))
+    # Footer (SquadCalc hint) only makes sense when clickable map icons are
+    # actually visible: during/after suggestions, or on a completed winner.
+    show_footer = (
+        phase in ("suggestions_open", "suggestions_closed", "voting")
+        and event.get("suggestions")
+    ) or (phase == "completed" and event.get("winning_layer"))
+    if show_footer:
+        embed.set_footer(text=t("embed.footer", lang))
     return embed
 
 

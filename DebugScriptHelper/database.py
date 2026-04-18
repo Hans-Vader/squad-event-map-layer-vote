@@ -494,6 +494,8 @@ def build_default_event(suggestion_start_time=None) -> dict:
         "phase": "created",
         "event_message_id": None,
         "suggestion_start_time": suggestion_start_time,
+        "suggestion_end_time": None,
+        "suggestion_duration_seconds": None,
         "voting_start_time": None,
         "voting_duration_hours": 24,
         "poll_message_id": None,

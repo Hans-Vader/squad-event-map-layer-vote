@@ -214,6 +214,38 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Die Vorschlagsphase ist nicht geöffnet.",
         "en": "The suggestion phase is not open.",
     },
+    "phase.duration_modal_title": {
+        "de": "Vorschlagsphase starten",
+        "en": "Start Suggestion Phase",
+    },
+    "phase.duration_label": {
+        "de": "Dauer (z.B. 60, 2h, 1d) — leer = manuell",
+        "en": "Duration (e.g. 60, 2h, 1d) — empty = manual",
+    },
+    "phase.duration_placeholder": {
+        "de": "Leer lassen für manuelles Ende",
+        "en": "Leave blank for manual end",
+    },
+    "phase.invalid_duration": {
+        "de": "Ungültige Dauer: `{value}`. Erwartet z.B. `60`, `2h`, `1d`.",
+        "en": "Invalid duration: `{value}`. Expected e.g. `60`, `2h`, `1d`.",
+    },
+    "phase.suggestions_opened_until": {
+        "de": "Vorschlagsphase eröffnet bis <t:{ts}:f> (<t:{ts}:R>).",
+        "en": "Suggestion phase opened until <t:{ts}:f> (<t:{ts}:R>).",
+    },
+    "phase.auto_vote_started": {
+        "de": "Vorschlagszeit abgelaufen — Abstimmung automatisch mit {count} Layern gestartet.",
+        "en": "Suggestion time expired — voting auto-started with {count} layers.",
+    },
+    "phase.selection_needed": {
+        "de": "{mention} Vorschlagszeit abgelaufen in <#{channel_id}> — {count} Vorschläge, manuelle Auswahl erforderlich (max {max}).",
+        "en": "{mention} Suggestion time expired in <#{channel_id}> — {count} suggestions, manual selection required (max {max}).",
+    },
+    "embed.status_suggestions_open_until": {
+        "de": "Vorschläge offen bis <t:{ts}:f> (<t:{ts}:R>)",
+        "en": "Suggestions open until <t:{ts}:f> (<t:{ts}:R>)",
+    },
 
     # ── Confirmation ─────────────────────────────────────────────────────
     "confirm.close_suggestions": {

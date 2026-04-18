@@ -42,6 +42,36 @@ if not TOKEN:
     logger.critical("DISCORD_BOT_TOKEN not set. Exiting.")
     sys.exit(1)
 
+
+# ---------------------------------------------------------------------------
+# Duration parsing ("60" -> 3600s, "2h" -> 7200s, "1d" -> 86400s)
+# ---------------------------------------------------------------------------
+
+def parse_duration_to_seconds(value: str) -> Optional[int]:
+    """Parse a duration string. Bare numbers are treated as minutes.
+
+    Returns seconds (clamped to [60, 30*86400]) or None when unparseable/empty.
+    """
+    if not value:
+        return None
+    v = value.strip().lower()
+    if not v:
+        return None
+    mult = 60  # default: minutes
+    if v.endswith("m"):
+        v, mult = v[:-1], 60
+    elif v.endswith("h"):
+        v, mult = v[:-1], 3600
+    elif v.endswith("d"):
+        v, mult = v[:-1], 86400
+    try:
+        seconds = int(float(v) * mult)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return max(60, min(seconds, 30 * 86400))
+
 # ---------------------------------------------------------------------------
 # Map name overrides (shorten long names at import time)
 # ---------------------------------------------------------------------------
@@ -1061,7 +1091,9 @@ class AdminButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         if self.action == "open_suggestions":
-            await admin_open_suggestions(interaction)
+            settings = db.get_guild_settings(interaction.guild_id)
+            lang = settings.get("language", "en") if settings else "en"
+            await interaction.response.send_modal(OpenSuggestionsModal(lang))
         elif self.action == "close_suggestions":
             await admin_close_suggestions(interaction)
         elif self.action == "select_for_vote":
@@ -1096,9 +1128,14 @@ class ConfirmActionView(ui.View):
         )
 
 
-async def admin_open_suggestions(interaction: discord.Interaction):
-    """Open the suggestion phase."""
+async def admin_open_suggestions(interaction: discord.Interaction,
+                                 auto_close_seconds: Optional[int] = None):
+    """Open the suggestion phase. When auto_close_seconds is set, the phase
+    auto-closes (and either starts voting or pings the organizer role for
+    manual selection) when the timer expires. Uses send_message so the flow
+    works both from a button click and from a modal submit."""
     lock = _get_guild_lock(interaction.guild_id)
+    end_time = None
     async with lock:
         record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
         if not record:
@@ -1108,21 +1145,56 @@ async def admin_open_suggestions(interaction: discord.Interaction):
         lang = settings.get("language", "en") if settings else "en"
 
         if event.get("phase") not in ("created",):
-            await interaction.response.edit_message(
+            await interaction.response.send_message(
                 embed=discord.Embed(description=t("phase.already_open", lang), color=discord.Color.orange()),
-                view=None,
+                ephemeral=True,
             )
             return
 
         event["phase"] = "suggestions_open"
+        end_time = (datetime.now() + timedelta(seconds=auto_close_seconds)) if auto_close_seconds else None
+        event["suggestion_end_time"] = end_time
+        event["suggestion_duration_seconds"] = auto_close_seconds
         db.save_event(record["db_id"], event)
 
-    await interaction.response.edit_message(
-        embed=discord.Embed(description=f"✅ {t('phase.suggestions_opened', lang)}", color=discord.Color.green()),
-        view=None,
+    if end_time:
+        ts = int(end_time.timestamp())
+        ack_text = t("phase.suggestions_opened_until", lang, ts=ts)
+    else:
+        ack_text = t("phase.suggestions_opened", lang)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(description=f"✅ {ack_text}", color=discord.Color.green()),
+        ephemeral=True,
     )
     await _update_event_embed(interaction.guild_id, interaction.channel_id)
-    await send_to_log_channel("Suggestion phase opened", guild_id=interaction.guild_id)
+    await send_to_log_channel(ack_text, guild_id=interaction.guild_id)
+
+
+class OpenSuggestionsModal(ui.Modal):
+    """Prompts the organizer for an optional suggestion-phase duration."""
+
+    def __init__(self, lang: str):
+        super().__init__(title=t("phase.duration_modal_title", lang))
+        self.lang = lang
+        self.duration_input = ui.TextInput(
+            label=t("phase.duration_label", lang),
+            placeholder=t("phase.duration_placeholder", lang),
+            required=False,
+            max_length=20,
+        )
+        self.add_item(self.duration_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = (self.duration_input.value or "").strip()
+        seconds = parse_duration_to_seconds(raw) if raw else None
+        if raw and seconds is None:
+            await interaction.response.send_message(
+                t("phase.invalid_duration", self.lang, value=raw),
+                ephemeral=True,
+            )
+            return
+        await admin_open_suggestions(interaction, auto_close_seconds=seconds)
 
 
 async def admin_close_suggestions(interaction: discord.Interaction):
@@ -1371,6 +1443,58 @@ async def _start_poll(interaction: discord.Interaction, selected_ids: list[str])
         f"Voting started with {len(selected)} layers for {duration_hours}h",
         guild_id=interaction.guild_id,
     )
+
+
+async def _auto_start_poll(guild_id: int, channel_id: int,
+                           selected_ids: list[str]) -> bool:
+    """Background variant of _start_poll — creates the poll without an
+    interaction. Returns True on success.
+
+    Assumes the event phase has already been set to "voting" under lock."""
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return False
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return False
+
+    record = db.get_event_by_channel(guild_id, channel_id)
+    if not record:
+        return False
+
+    event = record["event"]
+    settings = db.get_guild_settings(guild_id)
+    lang = settings.get("language", "en") if settings else "en"
+    suggestions = event.get("suggestions", [])
+    duration_hours = event.get("voting_duration_hours", 24)
+
+    selected = [s for s in suggestions if s.get("id") in selected_ids]
+    if not selected:
+        return False
+
+    poll = discord.Poll(
+        question=t("vote.poll_question", lang),
+        duration=timedelta(hours=duration_hours),
+        multiple=False,
+    )
+    for s in selected[:10]:
+        poll.add_answer(text=format_layer_poll_option(s))
+
+    try:
+        poll_message = await channel.send(poll=poll)
+    except Exception as e:
+        logger.error(f"Failed to send auto-poll: {e}")
+        return False
+
+    lock = _get_guild_lock(guild_id)
+    async with lock:
+        rec = db.get_event_by_channel(guild_id, channel_id)
+        if rec:
+            rec["event"]["poll_message_id"] = poll_message.id
+            db.save_event(rec["db_id"], rec["event"])
+
+    await _update_event_embed(guild_id, channel_id)
+    return True
 
 
 async def admin_end_vote(interaction: discord.Interaction):
@@ -1907,10 +2031,12 @@ async def cmd_refresh_layers(interaction: discord.Interaction):
 @bot.tree.command(name="create_layer_suggestion", description="Create a new layer vote event in this channel")
 @app_commands.describe(
     suggestion_start="When to auto-open suggestions (DD.MM.YYYY HH:MM) or leave empty for manual",
+    suggestion_duration="Suggestion window length, e.g. '60' (mins), '2h', '1d'. Empty = manual close.",
     voting_duration_hours="How long the vote lasts in hours (default 24)",
 )
 async def cmd_create_event(interaction: discord.Interaction,
                            suggestion_start: str = None,
+                           suggestion_duration: str = None,
                            voting_duration_hours: int = 24):
     settings = await check_guild_configured(interaction)
     if not settings:
@@ -1943,8 +2069,19 @@ async def cmd_create_event(interaction: discord.Interaction,
         except Exception:
             pass
 
+    suggestion_duration_seconds = None
+    if suggestion_duration:
+        suggestion_duration_seconds = parse_duration_to_seconds(suggestion_duration)
+        if suggestion_duration_seconds is None:
+            await interaction.response.send_message(
+                t("phase.invalid_duration", lang, value=suggestion_duration),
+                ephemeral=True,
+            )
+            return
+
     event_data = db.build_default_event(suggestion_start_time=sst)
     event_data["voting_duration_hours"] = max(1, min(168, voting_duration_hours))
+    event_data["suggestion_duration_seconds"] = suggestion_duration_seconds
 
     # Create event in DB first
     db_id = db.create_event(interaction.guild_id, interaction.channel_id, event_data)
@@ -1971,7 +2108,10 @@ async def cmd_create_event(interaction: discord.Interaction,
 
 
 @bot.tree.command(name="open_suggestions", description="Manually open the suggestion phase")
-async def cmd_open_suggestions(interaction: discord.Interaction):
+@app_commands.describe(
+    duration="Optional — e.g. '60' (mins), '2h', '1d'. Empty = manual close.",
+)
+async def cmd_open_suggestions(interaction: discord.Interaction, duration: str = None):
     settings = await check_guild_configured(interaction)
     if not settings:
         return
@@ -1980,7 +2120,16 @@ async def cmd_open_suggestions(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
+    seconds = None
+    if duration:
+        seconds = parse_duration_to_seconds(duration)
+        if seconds is None:
+            await interaction.response.send_message(
+                t("phase.invalid_duration", lang, value=duration), ephemeral=True)
+            return
+
     lock = _get_guild_lock(interaction.guild_id)
+    end_time = None
     async with lock:
         record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
         if not record:
@@ -1993,11 +2142,20 @@ async def cmd_open_suggestions(interaction: discord.Interaction):
             return
 
         event["phase"] = "suggestions_open"
+        end_time = (datetime.now() + timedelta(seconds=seconds)) if seconds else None
+        event["suggestion_end_time"] = end_time
+        event["suggestion_duration_seconds"] = seconds
         db.save_event(record["db_id"], event)
 
-    await interaction.response.send_message(f"✅ {t('phase.suggestions_opened', lang)}", ephemeral=True)
+    if end_time:
+        ts = int(end_time.timestamp())
+        ack_text = t("phase.suggestions_opened_until", lang, ts=ts)
+    else:
+        ack_text = t("phase.suggestions_opened", lang)
+
+    await interaction.response.send_message(f"✅ {ack_text}", ephemeral=True)
     await _update_event_embed(interaction.guild_id, interaction.channel_id)
-    await send_to_log_channel("Suggestion phase opened manually", guild_id=interaction.guild_id)
+    await send_to_log_channel(ack_text, guild_id=interaction.guild_id)
 
 
 @bot.tree.command(name="close_suggestions", description="Close the suggestion phase")
@@ -2285,6 +2443,99 @@ async def cmd_history(interaction: discord.Interaction, count: int = 5):
 # BACKGROUND TASK — Check events loop
 # ═══════════════════════════════════════════════════════════════════════════
 
+async def _handle_suggestion_timeout(guild_id: int, channel_id: int):
+    """Fire when a suggestion phase's auto-close timer expires.
+
+    - If suggestions count fits in max_voting_layers: phase -> voting and
+      auto-start the poll with every suggestion.
+    - Otherwise: phase -> suggestions_closed and ping the organizer role in
+      the log channel so they can run manual selection.
+    """
+    settings = db.get_guild_settings(guild_id) or {}
+    lang = settings.get("language", "en")
+    organizer_role_id = settings.get("organizer_role_id", 0) or 0
+
+    auto_started_ids: Optional[list[str]] = None
+    needs_selection = False
+    suggestion_count = 0
+    max_voting = 10
+
+    lock = _get_guild_lock(guild_id)
+    async with lock:
+        rec = db.get_event_by_channel(guild_id, channel_id)
+        if not rec:
+            return
+        event = rec["event"]
+        if event.get("phase") != "suggestions_open":
+            return
+
+        suggestions = event.get("suggestions", [])
+        suggestion_count = len(suggestions)
+        max_voting = min(int(event.get("max_voting_layers", 10) or 10), 10)
+        # Clear the timer so we don't fire twice.
+        event["suggestion_end_time"] = None
+
+        if suggestion_count == 0 or suggestion_count <= max_voting:
+            # Auto-start voting with every suggestion (or transition to a
+            # no-suggestion completed state if there are none).
+            if suggestion_count == 0:
+                event["phase"] = "suggestions_closed"
+                needs_selection = False
+            else:
+                selected_ids = [s["id"] for s in suggestions]
+                event["selected_for_vote"] = selected_ids
+                event["phase"] = "voting"
+                auto_started_ids = selected_ids
+        else:
+            event["phase"] = "suggestions_closed"
+            needs_selection = True
+
+        db.save_event(rec["db_id"], event)
+
+    if auto_started_ids:
+        ok = await _auto_start_poll(guild_id, channel_id, auto_started_ids)
+        if ok:
+            await send_to_log_channel(
+                t("phase.auto_vote_started", lang, count=len(auto_started_ids)),
+                guild_id=guild_id,
+            )
+            return
+        # Poll creation failed — fall through to manual-selection path so
+        # the organizer can still act.
+        lock2 = _get_guild_lock(guild_id)
+        async with lock2:
+            rec = db.get_event_by_channel(guild_id, channel_id)
+            if rec and rec["event"].get("phase") == "voting":
+                rec["event"]["phase"] = "suggestions_closed"
+                rec["event"]["selected_for_vote"] = []
+                db.save_event(rec["db_id"], rec["event"])
+        needs_selection = True
+
+    await _update_event_embed(guild_id, channel_id)
+
+    if needs_selection:
+        mention = f"<@&{organizer_role_id}>" if organizer_role_id else ""
+        msg = t(
+            "phase.selection_needed", lang,
+            mention=mention,
+            channel_id=channel_id,
+            count=suggestion_count,
+            max=max_voting,
+        )
+        await send_to_log_channel(
+            msg,
+            guild_id=guild_id,
+            level="WARNING",
+            mention_role_id=organizer_role_id,
+        )
+    elif suggestion_count == 0:
+        await send_to_log_channel(
+            f"Suggestion phase auto-closed with 0 suggestions in <#{channel_id}>",
+            guild_id=guild_id,
+            level="WARNING",
+        )
+
+
 async def check_events_loop():
     """Background loop that checks for scheduled events."""
     await bot.wait_until_ready()
@@ -2314,12 +2565,29 @@ async def check_events_loop():
                                 rec = db.get_event_by_channel(guild_id, channel_id)
                                 if rec and rec["event"].get("phase") == "created":
                                     rec["event"]["phase"] = "suggestions_open"
+                                    # Propagate the optional auto-close window
+                                    # configured at event-creation time.
+                                    dur = rec["event"].get("suggestion_duration_seconds")
+                                    if dur:
+                                        rec["event"]["suggestion_end_time"] = (
+                                            now + timedelta(seconds=int(dur))
+                                        )
                                     db.save_event(rec["db_id"], rec["event"])
                             await _update_event_embed(guild_id, channel_id)
                             await send_to_log_channel(
                                 f"Suggestion phase auto-opened in <#{channel_id}>",
                                 guild_id=guild_id,
                             )
+                        elif seconds_until < EVENT_CRITICAL_WINDOW:
+                            sleep_time = EVENT_CHECK_INTERVAL_FAST
+
+                # Auto-close suggestions when their timer expires
+                if phase == "suggestions_open":
+                    set_end = event.get("suggestion_end_time")
+                    if set_end and isinstance(set_end, datetime):
+                        seconds_until = (set_end - now).total_seconds()
+                        if seconds_until <= 0:
+                            await _handle_suggestion_timeout(guild_id, channel_id)
                         elif seconds_until < EVENT_CRITICAL_WINDOW:
                             sleep_time = EVENT_CHECK_INTERVAL_FAST
 
