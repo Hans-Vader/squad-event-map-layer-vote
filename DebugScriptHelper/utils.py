@@ -131,10 +131,14 @@ def build_squadcalc_url(suggestion: dict) -> Optional[str]:
 
     t1u = suggestion.get("team1_unit")
     t2u = suggestion.get("team2_unit")
+    # Prefix (LO, LD, MO, S, …) is layer + team dependent. Stored on the
+    # suggestion at submit time; fall back to LO for legacy rows.
+    t1_prefix = suggestion.get("team1_unit_prefix") or "LO"
+    t2_prefix = suggestion.get("team2_unit_prefix") or "LO"
     if t1u and t1u != "Default":
-        params["team1unit"] = t1 + "_LO_" + t1u
+        params["team1unit"] = f"{t1}_{t1_prefix}_{t1u}"
     if t2u and t2u != "Default":
-        params["team2unit"] = t2 + "_LO_" + t2u
+        params["team2unit"] = f"{t2}_{t2_prefix}_{t2u}"
 
     return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
 

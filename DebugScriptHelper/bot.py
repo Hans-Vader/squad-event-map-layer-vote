@@ -164,12 +164,17 @@ async def fetch_and_cache_layers() -> int:
         ):
             continue
 
-        # Extract factions with their unit types
+        # Extract factions with their unit types, default unit, and team availability.
+        # Entries are kept verbatim (no dedup) because the same factionId can appear
+        # once per team with a different defaultUnit (e.g. ADF_LO_* for team1,
+        # ADF_LD_* for team2 on Invasion layers).
         factions_data = []
         raw_factions = layer.get("factions") or []
         for fac in raw_factions:
             if isinstance(fac, dict):
                 fac_id = fac.get("factionId", "")
+                default_unit = fac.get("defaultUnit", "") or ""
+                available_on_teams = fac.get("availableOnTeams") or []
                 unit_types = []
                 for ut in fac.get("types", []):
                     if isinstance(ut, str):
@@ -180,9 +185,19 @@ async def fetch_and_cache_layers() -> int:
                             "name": ut.get("name", ut.get("type", "")),
                         })
                 if fac_id:
-                    factions_data.append({"factionId": fac_id, "unitTypes": unit_types})
+                    factions_data.append({
+                        "factionId": fac_id,
+                        "defaultUnit": default_unit,
+                        "availableOnTeams": available_on_teams,
+                        "unitTypes": unit_types,
+                    })
             elif isinstance(fac, str):
-                factions_data.append({"factionId": fac, "unitTypes": []})
+                factions_data.append({
+                    "factionId": fac,
+                    "defaultUnit": "",
+                    "availableOnTeams": [],
+                    "unitTypes": [],
+                })
 
         # Extract team alliance restrictions
         team_configs = layer.get("teamConfigs", {})
@@ -240,7 +255,15 @@ def get_factions_for_team(layer_data: dict, team: int,
     result = []
     for fac in factions:
         fac_id = fac.get("factionId", "") if isinstance(fac, dict) else fac
-        if not fac_id or fac_id in seen_ids:
+        if not fac_id:
+            continue
+        # Filter by availableOnTeams when present — on layers like Invasion the
+        # same factionId appears twice, once per team, with different defaultUnits.
+        if isinstance(fac, dict):
+            available = fac.get("availableOnTeams") or []
+            if available and team not in available:
+                continue
+        if fac_id in seen_ids:
             continue
         if allowed_alliances and fac_id not in allowed_faction_ids:
             continue
@@ -251,7 +274,9 @@ def get_factions_for_team(layer_data: dict, team: int,
 
         seen_ids.add(fac_id)
         unit_types = []
+        default_unit = ""
         if isinstance(fac, dict):
+            default_unit = fac.get("defaultUnit", "") or ""
             for ut in fac.get("unitTypes", fac.get("types", [])):
                 ut_type = ut.get("type", "") if isinstance(ut, dict) else ut
                 if blacklisted_units and ut_type in blacklisted_units:
@@ -259,21 +284,87 @@ def get_factions_for_team(layer_data: dict, team: int,
                 if ut_type:
                     unit_types.append(ut if isinstance(ut, dict) else {"type": ut, "name": ut})
 
-        result.append({"factionId": fac_id, "unitTypes": unit_types})
+        result.append({
+            "factionId": fac_id,
+            "defaultUnit": default_unit,
+            "unitTypes": unit_types,
+        })
     return result
 
 
 def get_unit_types_for_faction(factions: list[dict], faction_id: str,
-                               blacklisted_units: list[str] = None) -> list[dict]:
-    """Get available unit types for a specific faction."""
+                               blacklisted_units: list[str] = None,
+                               team: int = None) -> list[dict]:
+    """Get available unit types for a specific faction.
+
+    When `team` is given, prefers the faction entry whose availableOnTeams
+    matches — Invasion-style layers keep separate entries per team and they
+    can expose different unit types.
+    """
+    fallback = None
     for fac in factions:
         fac_id = fac.get("factionId", "") if isinstance(fac, dict) else fac
-        if fac_id == faction_id:
-            units = (fac.get("unitTypes", fac.get("types", []))) if isinstance(fac, dict) else []
-            if blacklisted_units:
-                return [u for u in units if u.get("type", "") not in blacklisted_units]
-            return units
-    return []
+        if fac_id != faction_id:
+            continue
+        units = (fac.get("unitTypes", fac.get("types", []))) if isinstance(fac, dict) else []
+        if blacklisted_units:
+            units = [u for u in units if (u.get("type", "") if isinstance(u, dict) else u) not in blacklisted_units]
+        if team is not None and isinstance(fac, dict):
+            available = fac.get("availableOnTeams") or []
+            if available and team not in available:
+                if fallback is None:
+                    fallback = units
+                continue
+        return units
+    return fallback or []
+
+
+def get_faction_entry_for_team(factions: list[dict], faction_id: str,
+                               team: int) -> Optional[dict]:
+    """Return the faction entry for (factionId, team), or None.
+
+    Prefers an entry listing the team in availableOnTeams; falls back to the
+    first matching factionId when no team info is stored (older cache rows).
+    """
+    fallback = None
+    for fac in factions:
+        if not isinstance(fac, dict) or fac.get("factionId") != faction_id:
+            continue
+        available = fac.get("availableOnTeams") or []
+        if not available:
+            fallback = fallback or fac
+            continue
+        if team in available:
+            return fac
+    return fallback
+
+
+def _resolve_unit_prefix(layer_data: dict, faction_id: str, team: int) -> Optional[str]:
+    """Look up the unit prefix (LO, LD, MO, S, …) for a faction on a team."""
+    if not layer_data or not faction_id:
+        return None
+    entry = get_faction_entry_for_team(layer_data.get("factions", []), faction_id, team)
+    if not entry:
+        return None
+    return extract_unit_prefix(entry.get("defaultUnit", ""), faction_id)
+
+
+def extract_unit_prefix(default_unit: str, faction_id: str) -> Optional[str]:
+    """Extract the middle token from a defaultUnit string.
+
+    `ADF_LO_CombinedArms`  -> `LO`
+    `ADF_LD_CombinedArms`  -> `LD`
+    `ADF_S_CombinedArms_Seed` -> `S`
+    Returns None if the string doesn't match the expected pattern.
+    """
+    if not default_unit or not faction_id:
+        return None
+    prefix = f"{faction_id}_"
+    if not default_unit.startswith(prefix):
+        return None
+    remainder = default_unit[len(prefix):]
+    token, _, _ = remainder.partition("_")
+    return token or None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -539,7 +630,7 @@ class Team1FactionSelect(ui.Select):
 
         # Get unit types for team 1 faction
         units = get_unit_types_for_faction(
-            state.layer_data.get("factions", []), state.team1_faction, bl_units)
+            state.layer_data.get("factions", []), state.team1_faction, bl_units, team=1)
 
         if not units:
             # No unit types — skip to team 2
@@ -653,7 +744,7 @@ class Team2FactionSelect(ui.Select):
 
         # Get unit types for team 2 faction
         units = get_unit_types_for_faction(
-            state.layer_data.get("factions", []), state.team2_faction, bl_units)
+            state.layer_data.get("factions", []), state.team2_faction, bl_units, team=2)
 
         if not units:
             state.team2_unit = "Default"
@@ -796,6 +887,8 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
             "team1_unit": state.team1_unit,
             "team2_faction": state.team2_faction,
             "team2_unit": state.team2_unit,
+            "team1_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team1_faction, 1),
+            "team2_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team2_faction, 2),
             "raw_name": state.mode_raw_name,
             "suggested_at": datetime.now().isoformat(),
         }
