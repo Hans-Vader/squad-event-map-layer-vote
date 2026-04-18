@@ -176,14 +176,22 @@ async def fetch_and_cache_layers() -> int:
                 default_unit = fac.get("defaultUnit", "") or ""
                 available_on_teams = fac.get("availableOnTeams") or []
                 unit_types = []
+                # Prepend the default unit (e.g. "CombinedArms") — it's never
+                # listed in `types` but is always a valid selection.
+                default_type = _extract_default_unit_type(default_unit, fac_id)
+                if default_type:
+                    unit_types.append({"type": default_type, "name": default_type})
                 for ut in fac.get("types", []):
                     if isinstance(ut, str):
-                        unit_types.append({"type": ut, "name": ut})
+                        if ut != default_type:
+                            unit_types.append({"type": ut, "name": ut})
                     elif isinstance(ut, dict):
-                        unit_types.append({
-                            "type": ut.get("type", ""),
-                            "name": ut.get("name", ut.get("type", "")),
-                        })
+                        ut_type = ut.get("type", "")
+                        if ut_type != default_type:
+                            unit_types.append({
+                                "type": ut_type,
+                                "name": ut.get("name", ut_type),
+                            })
                 if fac_id:
                     factions_data.append({
                         "factionId": fac_id,
@@ -365,6 +373,22 @@ def extract_unit_prefix(default_unit: str, faction_id: str) -> Optional[str]:
     remainder = default_unit[len(prefix):]
     token, _, _ = remainder.partition("_")
     return token or None
+
+
+def _extract_default_unit_type(default_unit: str, faction_id: str) -> Optional[str]:
+    """Extract the unit type suffix from a defaultUnit string.
+
+    `ADF_LO_CombinedArms`       -> `CombinedArms`
+    `ADF_S_CombinedArms_Seed`   -> `CombinedArms_Seed`
+    """
+    if not default_unit or not faction_id:
+        return None
+    prefix = f"{faction_id}_"
+    if not default_unit.startswith(prefix):
+        return None
+    remainder = default_unit[len(prefix):]
+    _, _, rest = remainder.partition("_")
+    return rest or None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
