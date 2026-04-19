@@ -94,6 +94,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Vorschlags-Einstellungen aktualisiert.",
         "en": "Suggestion settings updated.",
     },
+    "config.create_suggestion_updated": {
+        "de": "Standardwerte für `/create_layer_suggestion` aktualisiert:",
+        "en": "Defaults for `/create_layer_suggestion` updated:",
+    },
     "config.roles_updated": {
         "de": "Rollen-Einstellungen aktualisiert ({type}).",
         "en": "Role settings updated ({type}).",

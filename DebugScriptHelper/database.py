@@ -63,6 +63,13 @@ DEFAULT_GUILD_SETTINGS = {
     "max_suggestions_per_user": 2,
     "max_total_suggestions": 25,
     "history_lookback_events": 3,
+    # Defaults used by /create_layer_suggestion when the corresponding
+    # parameter is omitted. suggestion_start/duration are stored as duration
+    # strings (e.g. "1h", "30m"); start is applied as an offset from now.
+    "default_suggestion_start": None,
+    "default_suggestion_duration": None,
+    "default_voting_duration_hours": 24,
+    "default_allow_multiple_votes": False,
 }
 
 
@@ -502,5 +509,6 @@ def build_default_event(suggestion_start_time=None) -> dict:
         "max_voting_layers": 10,
         "selected_for_vote": [],
         "winning_layer": None,
+        "allow_multiple_votes": False,
         "suggestions": [],
     }

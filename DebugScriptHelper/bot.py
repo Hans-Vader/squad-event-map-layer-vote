@@ -1415,7 +1415,7 @@ async def _start_poll(interaction: discord.Interaction, selected_ids: list[str])
     poll = discord.Poll(
         question=t("vote.poll_question", lang),
         duration=timedelta(hours=duration_hours),
-        multiple=False,
+        multiple=bool(event.get("allow_multiple_votes", False)),
     )
     for s in selected[:10]:
         poll.add_answer(text=format_layer_poll_option(s))
@@ -1475,7 +1475,7 @@ async def _auto_start_poll(guild_id: int, channel_id: int,
     poll = discord.Poll(
         question=t("vote.poll_question", lang),
         duration=timedelta(hours=duration_hours),
-        multiple=False,
+        multiple=bool(event.get("allow_multiple_votes", False)),
     )
     for s in selected[:10]:
         poll.add_answer(text=format_layer_poll_option(s))
@@ -2004,6 +2004,73 @@ async def cmd_config_suggestions(interaction: discord.Interaction,
     await interaction.response.send_message(t("config.suggestions_updated", lang), ephemeral=True)
 
 
+@bot.tree.command(name="config_create_suggestion",
+                  description="Set defaults for /create_layer_suggestion parameters")
+@app_commands.describe(
+    suggestion_start="Default offset to auto-open suggestions after command run (e.g. '1h', '30m'). Empty string clears.",
+    suggestion_duration="Default suggestion window length (e.g. '60', '2h'). Empty string clears.",
+    voting_duration_hours="Default vote duration in hours (1-168)",
+    allow_multiple_votes="Default for allowing multiple poll votes per user",
+)
+async def cmd_config_create_suggestion(interaction: discord.Interaction,
+                                       suggestion_start: str = None,
+                                       suggestion_duration: str = None,
+                                       voting_duration_hours: int = None,
+                                       allow_multiple_votes: bool = None):
+    settings = await check_guild_configured(interaction)
+    if not settings:
+        return
+    if not await check_organizer(interaction, settings):
+        return
+
+    lang = settings.get("language", "en")
+
+    if suggestion_start is not None:
+        stripped = suggestion_start.strip()
+        if stripped == "":
+            settings["default_suggestion_start"] = None
+        else:
+            if parse_duration_to_seconds(stripped) is None:
+                await interaction.response.send_message(
+                    t("phase.invalid_duration", lang, value=suggestion_start),
+                    ephemeral=True,
+                )
+                return
+            settings["default_suggestion_start"] = stripped
+
+    if suggestion_duration is not None:
+        stripped = suggestion_duration.strip()
+        if stripped == "":
+            settings["default_suggestion_duration"] = None
+        else:
+            if parse_duration_to_seconds(stripped) is None:
+                await interaction.response.send_message(
+                    t("phase.invalid_duration", lang, value=suggestion_duration),
+                    ephemeral=True,
+                )
+                return
+            settings["default_suggestion_duration"] = stripped
+
+    if voting_duration_hours is not None:
+        settings["default_voting_duration_hours"] = max(1, min(168, voting_duration_hours))
+
+    if allow_multiple_votes is not None:
+        settings["default_allow_multiple_votes"] = bool(allow_multiple_votes)
+
+    db.save_guild_settings(interaction.guild_id, settings)
+
+    summary = (
+        f"• suggestion_start: `{settings.get('default_suggestion_start') or '—'}`\n"
+        f"• suggestion_duration: `{settings.get('default_suggestion_duration') or '—'}`\n"
+        f"• voting_duration_hours: `{settings.get('default_voting_duration_hours', 24)}`\n"
+        f"• allow_multiple_votes: `{settings.get('default_allow_multiple_votes', False)}`"
+    )
+    await interaction.response.send_message(
+        f"{t('config.create_suggestion_updated', lang)}\n{summary}",
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="refresh_layers", description="Re-fetch layer data from GitHub")
 async def cmd_refresh_layers(interaction: discord.Interaction):
     settings = await check_guild_configured(interaction)
@@ -2032,12 +2099,14 @@ async def cmd_refresh_layers(interaction: discord.Interaction):
 @app_commands.describe(
     suggestion_start="When to auto-open suggestions (DD.MM.YYYY HH:MM) or leave empty for manual",
     suggestion_duration="Suggestion window length, e.g. '60' (mins), '2h', '1d'. Empty = manual close.",
-    voting_duration_hours="How long the vote lasts in hours (default 24)",
+    voting_duration_hours="How long the vote lasts in hours (default from /config_create_suggestion)",
+    allow_multiple_votes="Allow each voter to pick multiple layers in the poll",
 )
 async def cmd_create_event(interaction: discord.Interaction,
                            suggestion_start: str = None,
                            suggestion_duration: str = None,
-                           voting_duration_hours: int = 24):
+                           voting_duration_hours: int = None,
+                           allow_multiple_votes: bool = None):
     settings = await check_guild_configured(interaction)
     if not settings:
         return
@@ -2054,20 +2123,33 @@ async def cmd_create_event(interaction: discord.Interaction,
         await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
         return
 
-    # Parse suggestion start time
+    # Apply guild-configured defaults when params are omitted
+    if suggestion_start is None:
+        suggestion_start = settings.get("default_suggestion_start")
+    if suggestion_duration is None:
+        suggestion_duration = settings.get("default_suggestion_duration")
+    if voting_duration_hours is None:
+        voting_duration_hours = settings.get("default_voting_duration_hours", 24)
+    if allow_multiple_votes is None:
+        allow_multiple_votes = settings.get("default_allow_multiple_votes", False)
+
+    # Parse suggestion start time. Accept absolute timestamps OR a duration
+    # offset from now (e.g. "1h" = start in one hour) — the latter is what
+    # gets stored by /config_create_suggestion.
     sst = None
     if suggestion_start:
-        try:
-            for fmt in ("%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M", "%d.%m %H:%M"):
-                try:
-                    sst = datetime.strptime(suggestion_start, fmt)
-                    if fmt == "%d.%m %H:%M":
-                        sst = sst.replace(year=datetime.now().year)
-                    break
-                except ValueError:
-                    continue
-        except Exception:
-            pass
+        for fmt in ("%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M", "%d.%m %H:%M"):
+            try:
+                sst = datetime.strptime(suggestion_start, fmt)
+                if fmt == "%d.%m %H:%M":
+                    sst = sst.replace(year=datetime.now().year)
+                break
+            except ValueError:
+                continue
+        if sst is None:
+            offset_seconds = parse_duration_to_seconds(suggestion_start)
+            if offset_seconds is not None:
+                sst = datetime.now() + timedelta(seconds=offset_seconds)
 
     suggestion_duration_seconds = None
     if suggestion_duration:
@@ -2082,6 +2164,7 @@ async def cmd_create_event(interaction: discord.Interaction,
     event_data = db.build_default_event(suggestion_start_time=sst)
     event_data["voting_duration_hours"] = max(1, min(168, voting_duration_hours))
     event_data["suggestion_duration_seconds"] = suggestion_duration_seconds
+    event_data["allow_multiple_votes"] = bool(allow_multiple_votes)
 
     # Create event in DB first
     db_id = db.create_event(interaction.guild_id, interaction.channel_id, event_data)
@@ -2263,7 +2346,7 @@ async def _start_poll_from_command(interaction: discord.Interaction, selected_id
     poll = discord.Poll(
         question=t("vote.poll_question", lang),
         duration=timedelta(hours=duration_hours),
-        multiple=False,
+        multiple=bool(event.get("allow_multiple_votes", False)),
     )
     for s in selected[:10]:
         poll.add_answer(text=format_layer_poll_option(s))
