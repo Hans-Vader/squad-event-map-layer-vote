@@ -1564,13 +1564,14 @@ async def admin_end_vote(interaction: discord.Interaction):
         event["winning_layer"] = winner
         db.save_event(record["db_id"], event)
 
-        # Save to history
-        db.save_voting_history(
-            interaction.guild_id,
-            interaction.channel_id,
-            event.get("suggestions", []),
-            winner,
-        )
+        # Only record events that actually produced a winner.
+        if winner:
+            db.save_voting_history(
+                interaction.guild_id,
+                interaction.channel_id,
+                event.get("suggestions", []),
+                winner,
+            )
 
     if winner:
         desc = f"✅ {t('vote.ended', lang)}\n{t('vote.winner', lang, layer=format_layer_short(winner))}"
@@ -2462,12 +2463,13 @@ async def cmd_end_vote(interaction: discord.Interaction):
         event["winning_layer"] = winner
         db.save_event(record["db_id"], event)
 
-        db.save_voting_history(
-            interaction.guild_id,
-            interaction.channel_id,
-            event.get("suggestions", []),
-            winner,
-        )
+        if winner:
+            db.save_voting_history(
+                interaction.guild_id,
+                interaction.channel_id,
+                event.get("suggestions", []),
+                winner,
+            )
 
     if winner:
         desc = f"✅ {t('vote.ended', lang)}\n{t('vote.winner', lang, layer=format_layer_short(winner))}"
@@ -2572,15 +2574,13 @@ async def cmd_history(interaction: discord.Interaction, count: int = 5):
 
     for entry in history:
         winner = entry.get("winning_layer")
-        date = entry.get("completed_at", "?")
-        if winner:
-            embed.add_field(
-                name=format_layer_short(winner),
-                value=date,
-                inline=False,
-            )
-        else:
-            embed.add_field(name=t("vote.no_winner", lang), value=date, inline=False)
+        if not winner:
+            continue
+        embed.add_field(
+            name=format_layer_short(winner),
+            value=entry.get("completed_at", "?"),
+            inline=False,
+        )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -2727,13 +2727,19 @@ async def cmd_history_remove(interaction: discord.Interaction):
     options = []
     for entry in history:
         winner = entry.get("winning_layer")
-        label = format_layer_poll_option(winner) if winner else t("vote.no_winner", lang)
+        if not winner:
+            continue
+        label = format_layer_poll_option(winner)
         date = str(entry.get("completed_at", ""))[:16]
         options.append(discord.SelectOption(
             label=label[:100],
             value=str(entry["id"]),
             description=date[:100] or None,
         ))
+
+    if not options:
+        await interaction.response.send_message(t("history.empty", lang), ephemeral=True)
+        return
 
     view = HistoryRemoveView(options, lang)
     await interaction.response.send_message(
@@ -2912,11 +2918,12 @@ async def check_events_loop():
                                                 rec["event"]["phase"] = "completed"
                                                 rec["event"]["winning_layer"] = winner
                                                 db.save_event(rec["db_id"], rec["event"])
-                                                db.save_voting_history(
-                                                    guild_id, channel_id,
-                                                    rec["event"].get("suggestions", []),
-                                                    winner,
-                                                )
+                                                if winner:
+                                                    db.save_voting_history(
+                                                        guild_id, channel_id,
+                                                        rec["event"].get("suggestions", []),
+                                                        winner,
+                                                    )
                                         await _update_event_embed(guild_id, channel_id)
                                         winner_str = format_layer_short(winner) if winner else "None"
                                         await send_to_log_channel(
