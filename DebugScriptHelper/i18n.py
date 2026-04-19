@@ -329,8 +329,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Status",
     },
     "embed.status_created": {
-        "de": "Erstellt — Vorschläge öffnen um <t:{ts}:f>" ,
-        "en": "Created — Suggestions open at <t:{ts}:f>",
+        "de": "Erstellt — Vorschläge öffnen um <t:{ts}:f> (<t:{ts}:R>)",
+        "en": "Created — Suggestions open at <t:{ts}:f> (<t:{ts}:R>)",
     },
     "embed.status_created_manual": {
         "de": "Erstellt — Wartet auf manuelle Eröffnung",
@@ -464,6 +464,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Gecachte Layers",
         "en": "Cached Layers",
     },
+    "settings.create_suggestion_defaults": {
+        "de": "Standardwerte für /create_layer_suggestion",
+        "en": "Defaults for /create_layer_suggestion",
+    },
 
     # ── History ───────────────────────────────────────────────────────────
     "history.title": {
@@ -477,6 +481,30 @@ _STRINGS: dict[str, dict[str, str]] = {
     "history.entry": {
         "de": "**{layer}** — {date}",
         "en": "**{layer}** — {date}",
+    },
+    "history.add_title": {
+        "de": "Layer zur History hinzufügen",
+        "en": "Add Layer to History",
+    },
+    "history.added": {
+        "de": "Layer zur History hinzugefügt.",
+        "en": "Layer added to history.",
+    },
+    "history.remove_prompt": {
+        "de": "Wähle einen History-Eintrag zum Entfernen:",
+        "en": "Select a history entry to remove:",
+    },
+    "history.remove_placeholder": {
+        "de": "History-Eintrag auswählen",
+        "en": "Select history entry",
+    },
+    "history.removed": {
+        "de": "History-Eintrag entfernt.",
+        "en": "History entry removed.",
+    },
+    "history.remove_not_found": {
+        "de": "History-Eintrag nicht gefunden.",
+        "en": "History entry not found.",
     },
 
     # ── Admin info ────────────────────────────────────────────────────────

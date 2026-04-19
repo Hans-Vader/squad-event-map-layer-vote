@@ -64,6 +64,8 @@ def parse_duration_to_seconds(value: str) -> Optional[int]:
         v, mult = v[:-1], 3600
     elif v.endswith("d"):
         v, mult = v[:-1], 86400
+    elif v.endswith("w"):
+        v, mult = v[:-1], 7 * 86400
     try:
         seconds = int(float(v) * mult)
     except (TypeError, ValueError):
@@ -71,6 +73,38 @@ def parse_duration_to_seconds(value: str) -> Optional[int]:
     if seconds <= 0:
         return None
     return max(60, min(seconds, 30 * 86400))
+
+
+# Max voting duration: two weeks, in hours.
+MAX_VOTING_DURATION_HOURS = 2 * 7 * 24  # 336h
+
+
+def parse_voting_duration_to_hours(value: str) -> Optional[int]:
+    """Parse a voting-duration string into hours.
+
+    Bare numbers are treated as hours (e.g. "24" = 24h). Suffixes h/d/w are
+    supported. Result is clamped to [1, MAX_VOTING_DURATION_HOURS]. Returns
+    None if the input is empty or unparseable.
+    """
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    if not v:
+        return None
+    mult_hours = 1  # default: hours
+    if v.endswith("h"):
+        v = v[:-1]
+    elif v.endswith("d"):
+        v, mult_hours = v[:-1], 24
+    elif v.endswith("w"):
+        v, mult_hours = v[:-1], 7 * 24
+    try:
+        hours = int(float(v) * mult_hours)
+    except (TypeError, ValueError):
+        return None
+    if hours <= 0:
+        return None
+    return max(1, min(hours, MAX_VOTING_DURATION_HOURS))
 
 # ---------------------------------------------------------------------------
 # Map name overrides (shorten long names at import time)
@@ -458,9 +492,9 @@ class SuggestState:
     """Tracks the state of a suggestion flow for a user."""
     __slots__ = ("guild_id", "channel_id", "map_name", "mode_raw_name",
                  "gamemode", "layer_version", "team1_faction", "team1_unit",
-                 "team2_faction", "team2_unit", "layer_data")
+                 "team2_faction", "team2_unit", "layer_data", "flow")
 
-    def __init__(self, guild_id: int, channel_id: int):
+    def __init__(self, guild_id: int, channel_id: int, flow: str = "suggest"):
         self.guild_id = guild_id
         self.channel_id = channel_id
         self.map_name = None
@@ -472,6 +506,9 @@ class SuggestState:
         self.team2_faction = None
         self.team2_unit = None
         self.layer_data = None
+        # "suggest" = normal event suggestion; "history_add" = manual
+        # insertion into voting_history via /history_add.
+        self.flow = flow
 
 
 # Active suggestion sessions: user_id -> SuggestState
@@ -894,6 +931,10 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
             embed=discord.Embed(description=t("general.timeout", lang), color=discord.Color.red()),
             view=None,
         )
+        return
+
+    if state.flow == "history_add":
+        await _handle_history_add_submit(interaction, state, lang)
         return
 
     lock = _get_guild_lock(state.guild_id)
@@ -2009,13 +2050,13 @@ async def cmd_config_suggestions(interaction: discord.Interaction,
 @app_commands.describe(
     suggestion_start="Default offset to auto-open suggestions after command run (e.g. '1h', '30m'). Empty string clears.",
     suggestion_duration="Default suggestion window length (e.g. '60', '2h'). Empty string clears.",
-    voting_duration_hours="Default vote duration in hours (1-168)",
+    voting_duration_hours="Default vote length: bare number = hours, or '24h' / '2d' / '1w'. Max '2w' (14 days).",
     allow_multiple_votes="Default for allowing multiple poll votes per user",
 )
 async def cmd_config_create_suggestion(interaction: discord.Interaction,
                                        suggestion_start: str = None,
                                        suggestion_duration: str = None,
-                                       voting_duration_hours: int = None,
+                                       voting_duration_hours: str = None,
                                        allow_multiple_votes: bool = None):
     settings = await check_guild_configured(interaction)
     if not settings:
@@ -2052,7 +2093,14 @@ async def cmd_config_create_suggestion(interaction: discord.Interaction,
             settings["default_suggestion_duration"] = stripped
 
     if voting_duration_hours is not None:
-        settings["default_voting_duration_hours"] = max(1, min(168, voting_duration_hours))
+        parsed_voting_hours = parse_voting_duration_to_hours(voting_duration_hours)
+        if parsed_voting_hours is None:
+            await interaction.response.send_message(
+                t("phase.invalid_duration", lang, value=voting_duration_hours),
+                ephemeral=True,
+            )
+            return
+        settings["default_voting_duration_hours"] = parsed_voting_hours
 
     if allow_multiple_votes is not None:
         settings["default_allow_multiple_votes"] = bool(allow_multiple_votes)
@@ -2099,13 +2147,13 @@ async def cmd_refresh_layers(interaction: discord.Interaction):
 @app_commands.describe(
     suggestion_start="When to auto-open suggestions (DD.MM.YYYY HH:MM) or leave empty for manual",
     suggestion_duration="Suggestion window length, e.g. '60' (mins), '2h', '1d'. Empty = manual close.",
-    voting_duration_hours="How long the vote lasts in hours (default from /config_create_suggestion)",
+    voting_duration_hours="Vote length: bare number = hours, or '24h' / '2d' / '1w'. Max '2w' (14 days).",
     allow_multiple_votes="Allow each voter to pick multiple layers in the poll",
 )
 async def cmd_create_event(interaction: discord.Interaction,
                            suggestion_start: str = None,
                            suggestion_duration: str = None,
-                           voting_duration_hours: int = None,
+                           voting_duration_hours: str = None,
                            allow_multiple_votes: bool = None):
     settings = await check_guild_configured(interaction)
     if not settings:
@@ -2128,10 +2176,20 @@ async def cmd_create_event(interaction: discord.Interaction,
         suggestion_start = settings.get("default_suggestion_start")
     if suggestion_duration is None:
         suggestion_duration = settings.get("default_suggestion_duration")
-    if voting_duration_hours is None:
-        voting_duration_hours = settings.get("default_voting_duration_hours", 24)
     if allow_multiple_votes is None:
         allow_multiple_votes = settings.get("default_allow_multiple_votes", False)
+
+    if voting_duration_hours is not None:
+        parsed_voting_hours = parse_voting_duration_to_hours(voting_duration_hours)
+        if parsed_voting_hours is None:
+            await interaction.response.send_message(
+                t("phase.invalid_duration", lang, value=voting_duration_hours),
+                ephemeral=True,
+            )
+            return
+        voting_duration_hours = parsed_voting_hours
+    else:
+        voting_duration_hours = int(settings.get("default_voting_duration_hours", 24))
 
     # Parse suggestion start time. Accept absolute timestamps OR a duration
     # offset from now (e.g. "1h" = start in one hour) — the latter is what
@@ -2162,7 +2220,7 @@ async def cmd_create_event(interaction: discord.Interaction,
             return
 
     event_data = db.build_default_event(suggestion_start_time=sst)
-    event_data["voting_duration_hours"] = max(1, min(168, voting_duration_hours))
+    event_data["voting_duration_hours"] = max(1, min(MAX_VOTING_DURATION_HOURS, voting_duration_hours))
     event_data["suggestion_duration_seconds"] = suggestion_duration_seconds
     event_data["allow_multiple_votes"] = bool(allow_multiple_votes)
 
@@ -2270,8 +2328,8 @@ async def cmd_close_suggestions(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="start_vote", description="Start voting with selected layers")
-@app_commands.describe(duration_hours="Vote duration in hours (default: event setting)")
-async def cmd_start_vote(interaction: discord.Interaction, duration_hours: int = None):
+@app_commands.describe(duration_hours="Vote length: bare number = hours, or '24h' / '2d' / '1w'. Max '2w' (14 days).")
+async def cmd_start_vote(interaction: discord.Interaction, duration_hours: str = None):
     settings = await check_guild_configured(interaction)
     if not settings:
         return
@@ -2297,12 +2355,17 @@ async def cmd_start_vote(interaction: discord.Interaction, duration_hours: int =
         return
 
     if duration_hours:
+        parsed_hours = parse_voting_duration_to_hours(duration_hours)
+        if parsed_hours is None:
+            await interaction.response.send_message(
+                t("phase.invalid_duration", lang, value=duration_hours), ephemeral=True)
+            return
         lock = _get_guild_lock(interaction.guild_id)
         async with lock:
             record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
             if record:
                 event = record["event"]
-                event["voting_duration_hours"] = max(1, min(168, duration_hours))
+                event["voting_duration_hours"] = parsed_hours
                 db.save_event(record["db_id"], event)
 
     captured_ids = list(selected)
@@ -2520,6 +2583,162 @@ async def cmd_history(interaction: discord.Interaction, count: int = 5):
             embed.add_field(name=t("vote.no_winner", lang), value=date, inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS — History editing
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _handle_history_add_submit(interaction: discord.Interaction,
+                                     state: SuggestState, lang: str):
+    """Save the picked layer as a standalone voting_history entry."""
+    settings = db.get_guild_settings(state.guild_id)
+    lang = settings.get("language", "en") if settings else lang
+
+    layer = {
+        "id": str(uuid.uuid4())[:8],
+        "user_id": str(interaction.user.id),
+        "user_name": interaction.user.display_name,
+        "map_name": state.map_name,
+        "gamemode": state.gamemode,
+        "layer_version": state.layer_version,
+        "team1_faction": state.team1_faction,
+        "team1_unit": state.team1_unit,
+        "team2_faction": state.team2_faction,
+        "team2_unit": state.team2_unit,
+        "team1_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team1_faction, 1),
+        "team2_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team2_faction, 2),
+        "raw_name": state.mode_raw_name,
+        "suggested_at": datetime.now().isoformat(),
+    }
+
+    db.save_voting_history(state.guild_id, state.channel_id, [layer], layer)
+
+    await interaction.response.edit_message(
+        embed=discord.Embed(
+            description=f"✅ {t('history.added', lang)}\n{format_layer_short(layer)}",
+            color=discord.Color.green(),
+        ),
+        view=None,
+    )
+    await send_to_log_channel(
+        f"History entry added by {interaction.user.display_name}: {format_layer_short(layer)}",
+        guild_id=state.guild_id,
+    )
+
+
+@bot.tree.command(name="history_add",
+                  description="Manually add a previously played layer to the history")
+async def cmd_history_add(interaction: discord.Interaction):
+    settings = await check_guild_configured(interaction)
+    if not settings:
+        return
+    if not await check_organizer(interaction, settings):
+        return
+
+    lang = settings.get("language", "en")
+
+    if db.get_layer_cache_count() == 0:
+        await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
+        return
+
+    state = SuggestState(interaction.guild_id, interaction.channel_id, flow="history_add")
+    _suggest_sessions[interaction.user.id] = state
+
+    blacklisted_maps = settings.get("blacklisted_maps", [])
+    maps = db.get_unique_maps(excluded_maps=blacklisted_maps)
+    if not maps:
+        await interaction.response.send_message(
+            t("general.error", lang, error="No maps available"), ephemeral=True)
+        return
+
+    options = [discord.SelectOption(label=m, value=m) for m in maps[:25]]
+    view = MapSelectView(options, lang)
+    embed = discord.Embed(
+        title=t("history.add_title", lang),
+        description=t("suggest.select_map", lang),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class HistoryRemoveView(ui.View):
+    def __init__(self, options: list[discord.SelectOption], lang: str):
+        super().__init__(timeout=120)
+        self.add_item(HistoryRemoveSelect(options, lang))
+
+
+class HistoryRemoveSelect(ui.Select):
+    def __init__(self, options: list[discord.SelectOption], lang: str):
+        super().__init__(
+            placeholder=t("history.remove_placeholder", lang),
+            options=options, min_values=1, max_values=1,
+        )
+        self.lang = lang
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            entry_id = int(self.values[0])
+        except (TypeError, ValueError):
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=t("general.error", self.lang, error="bad id"),
+                                    color=discord.Color.red()),
+                view=None,
+            )
+            return
+
+        removed = db.delete_voting_history_entry(entry_id)
+        if not removed:
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=t("history.remove_not_found", self.lang),
+                                    color=discord.Color.red()),
+                view=None,
+            )
+            return
+
+        await interaction.response.edit_message(
+            embed=discord.Embed(
+                description=f"✅ {t('history.removed', self.lang)}",
+                color=discord.Color.green(),
+            ),
+            view=None,
+        )
+        await send_to_log_channel(
+            f"History entry {entry_id} removed by {interaction.user.display_name}",
+            guild_id=interaction.guild_id,
+        )
+
+
+@bot.tree.command(name="history_remove",
+                  description="Remove an entry from the voting history")
+async def cmd_history_remove(interaction: discord.Interaction):
+    settings = await check_guild_configured(interaction)
+    if not settings:
+        return
+    if not await check_organizer(interaction, settings):
+        return
+
+    lang = settings.get("language", "en")
+    history = db.get_recent_history(interaction.guild_id, interaction.channel_id, limit=25)
+    if not history:
+        await interaction.response.send_message(t("history.empty", lang), ephemeral=True)
+        return
+
+    options = []
+    for entry in history:
+        winner = entry.get("winning_layer")
+        label = format_layer_poll_option(winner) if winner else t("vote.no_winner", lang)
+        date = str(entry.get("completed_at", ""))[:16]
+        options.append(discord.SelectOption(
+            label=label[:100],
+            value=str(entry["id"]),
+            description=date[:100] or None,
+        ))
+
+    view = HistoryRemoveView(options, lang)
+    await interaction.response.send_message(
+        t("history.remove_prompt", lang), view=view, ephemeral=True,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

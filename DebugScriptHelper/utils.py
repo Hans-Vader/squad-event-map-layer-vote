@@ -459,4 +459,16 @@ def build_settings_embed(settings: dict, guild: discord.Guild, layer_count: int)
         inline=True,
     )
 
+    defaults_value = (
+        f"`suggestion_start`: {settings.get('default_suggestion_start') or '—'}\n"
+        f"`suggestion_duration`: {settings.get('default_suggestion_duration') or '—'}\n"
+        f"`voting_duration_hours`: {settings.get('default_voting_duration_hours', 24)}\n"
+        f"`allow_multiple_votes`: {settings.get('default_allow_multiple_votes', False)}"
+    )
+    embed.add_field(
+        name=t("settings.create_suggestion_defaults", lang),
+        value=defaults_value,
+        inline=False,
+    )
+
     return embed

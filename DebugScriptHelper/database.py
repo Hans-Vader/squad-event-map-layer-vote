@@ -465,7 +465,7 @@ def get_recent_history(guild_id: int, channel_id: int, limit: int = 10) -> list[
     """Return recent voting history entries."""
     conn = _get_conn()
     rows = conn.execute(
-        """SELECT all_suggestions, winning_layer, completed_at
+        """SELECT id, all_suggestions, winning_layer, completed_at
            FROM voting_history
            WHERE guild_id = ? AND channel_id = ?
            ORDER BY completed_at DESC LIMIT ?""",
@@ -474,24 +474,42 @@ def get_recent_history(guild_id: int, channel_id: int, limit: int = 10) -> list[
     conn.close()
     return [
         {
-            "all_suggestions": _loads(row[0]),
-            "winning_layer": _loads(row[1]) if row[1] else None,
-            "completed_at": row[2],
+            "id": row[0],
+            "all_suggestions": _loads(row[1]),
+            "winning_layer": _loads(row[2]) if row[2] else None,
+            "completed_at": row[3],
         }
         for row in rows
     ]
 
 
+def delete_voting_history_entry(entry_id: int) -> bool:
+    """Delete a single voting_history row. Returns True if a row was removed."""
+    conn = _get_conn()
+    with conn:
+        cur = conn.execute("DELETE FROM voting_history WHERE id = ?", (entry_id,))
+        removed = cur.rowcount > 0
+    conn.close()
+    if removed:
+        logger.info(f"Voting history entry deleted: id={entry_id}")
+    return removed
+
+
 def get_blocked_suggestions(guild_id: int, channel_id: int, lookback: int) -> list[dict]:
     """Return all suggestions from the last `lookback` events for blocking.
 
-    Returns flat list of suggestion dicts from the last N completed events.
+    Includes both the full list of suggestions made during each event AND the
+    recorded winning_layer, so that manual history entries that only carry a
+    winner still get blocked.
     """
     history = get_recent_history(guild_id, channel_id, limit=lookback)
     blocked = []
     for entry in history:
         for suggestion in entry.get("all_suggestions", []):
             blocked.append(suggestion)
+        winner = entry.get("winning_layer")
+        if winner:
+            blocked.append(winner)
     return blocked
 
 
