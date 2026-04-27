@@ -559,16 +559,26 @@ class SuggestState:
 _suggest_sessions: dict[int, SuggestState] = {}
 
 
-def _resolve_event_sources(event: dict) -> list[str]:
+def _resolve_event_sources(event: dict, settings: dict) -> list[str]:
     """Return the list of source names a user may pick from for this event.
 
-    Falls back to the set of distinct sources currently in the layer cache when
-    the event has no explicit `allowed_sources` (i.e. it predates this feature).
+    The event's stored `allowed_sources` (chosen by the admin at creation time)
+    is the starting point. The guild's `allowed_sources` setting is then
+    applied as a live cap — so changes to /config_layer_sources take effect
+    immediately for already-active events, instead of being frozen at the
+    moment the event was created.
+
+    Falls back to all distinct sources currently in the cache when the event
+    has no explicit selection (legacy events that predate this feature).
     """
     explicit = event.get("allowed_sources") or []
-    if explicit:
-        return list(explicit)
-    return db.get_unique_sources()
+    candidate = list(explicit) if explicit else db.get_unique_sources()
+
+    guild_allowed = settings.get("allowed_sources") or []
+    if guild_allowed:
+        candidate = [s for s in candidate if s in guild_allowed]
+
+    return candidate
 
 
 async def handle_suggest_start(interaction: discord.Interaction):
@@ -610,7 +620,7 @@ async def handle_suggest_start(interaction: discord.Interaction):
     state = SuggestState(interaction.guild_id, interaction.channel_id)
     _suggest_sessions[interaction.user.id] = state
 
-    sources = _resolve_event_sources(event)
+    sources = _resolve_event_sources(event, settings)
     if len(sources) > 1:
         # Show source picker first; the map step runs after the user picks one.
         options = [discord.SelectOption(label=s, value=s) for s in sources[:25]]
