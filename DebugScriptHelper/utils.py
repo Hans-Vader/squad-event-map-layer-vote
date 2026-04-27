@@ -170,40 +170,15 @@ def build_squadcalc_url(suggestion: dict) -> Optional[str]:
     return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
 
 
-def _build_supermod_tooltip(suggestion: dict) -> str:
-    """One-line tooltip text for non-main-source layers: map + mode + factionNames."""
-    map_name = suggestion.get("map_name", "?")
-    gamemode = suggestion.get("gamemode", "?")
-    version = suggestion.get("layer_version", "")
-    mode_str = f"{gamemode} {version}".strip() if version else gamemode
-
-    t1_name = suggestion.get("team1_faction_name") or suggestion.get("team1_faction") or "?"
-    t2_name = suggestion.get("team2_faction_name") or suggestion.get("team2_faction") or "?"
-
-    text = f"{map_name} {mode_str} — {t1_name} vs {t2_name}"
-    # Markdown link titles are quoted with `"`; replace any embedded quotes so
-    # the link doesn't break (e.g. SU_IRGC's name contains "Saberin Unit").
-    return text.replace('"', "'")
-
-
 def build_map_icon_markdown(suggestion: dict) -> str:
-    """Render the 🗺️ map icon as a Discord link, with source-aware behaviour.
+    """Render the 🗺️ map icon as a Discord link when SquadCalc applies.
 
-    - Main-source layers: link to the parameterized SquadCalc URL.
-    - Other sources: link to SquadCalc's homepage with a tooltip that spells
-      out the map + version + full faction names (since the parameter URL
-      would 404 for SPM/SU layers).
-    - SquadCalc disabled (no base URL): plain emoji, no link.
+    Only main-source layers get a SquadCalc link — SPM/SU and other modded
+    sources show the plain emoji, since SquadCalc doesn't recognize their
+    map/faction params.
     """
-    if not SQUADCALC_BASE_URL:
-        return "🗺️"
-
     url = build_squadcalc_url(suggestion)
-    if url:
-        return f"[🗺️]({url})"
-
-    tooltip = _build_supermod_tooltip(suggestion)
-    return f'[🗺️]({SQUADCALC_BASE_URL}/ "{tooltip}")'
+    return f"[🗺️]({url})" if url else "🗺️"
 
 
 def format_suggestion_entry(index: int, suggestion: dict) -> str:
@@ -461,23 +436,21 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
                 inline=False,
             )
 
-    # Footer (SquadCalc hint) only makes sense when clickable map icons are
-    # actually visible: during/after suggestions, or on a completed winner.
-    # The supermod legend is appended whenever the supermod source is active
-    # for this event, so users can decode the SPM/SU and GoingDark prefixes.
-    show_squadcalc_hint = (
-        phase in ("suggestions_open", "suggestions_closed", "voting")
-        and event.get("suggestions")
-    ) or (phase == "completed" and event.get("winning_layer"))
-
-    footer_parts: list[str] = []
-    if show_squadcalc_hint:
-        footer_parts.append(t("embed.footer", lang))
+    # Footer: when the supermod source is active, the legend takes the slot
+    # so users can decode SPM/SU and GoingDark prefixes (the SquadCalc hint
+    # is suppressed since SquadCalc has no supermod map data anyway).
+    # Otherwise we fall back to the SquadCalc hint, which only makes sense
+    # when clickable map icons are visible (during/after suggestions, or on
+    # a completed winner).
     if _event_uses_supermod(event, settings):
-        footer_parts.append(t("embed.footer_legend_supermod", lang))
-
-    if footer_parts:
-        embed.set_footer(text="\n".join(footer_parts))
+        embed.set_footer(text=t("embed.footer_legend_supermod", lang))
+    else:
+        show_squadcalc_hint = (
+            phase in ("suggestions_open", "suggestions_closed", "voting")
+            and event.get("suggestions")
+        ) or (phase == "completed" and event.get("winning_layer"))
+        if show_squadcalc_hint:
+            embed.set_footer(text=t("embed.footer", lang))
     return embed
 
 
