@@ -229,6 +229,11 @@ async def fetch_and_cache_layers() -> int:
             )
             continue
 
+        # Build factionID → alliance from the source's Units block — this is the
+        # source of truth and covers SuperMod factions (SU_*) the hardcoded
+        # ALLIANCE_FACTIONS map doesn't know about.
+        faction_alliance = _build_faction_alliance_map(data)
+
         # Within a single source, dedupe by rawName (last wins).
         unique: dict[str, dict] = {}
         for layer in layers_list:
@@ -238,9 +243,27 @@ async def fetch_and_cache_layers() -> int:
             if raw_name:
                 unique[raw_name] = layer
 
-        count += await _cache_source_layers(source_name, unique.values())
+        count += await _cache_source_layers(source_name, unique.values(), faction_alliance)
 
     return count
+
+
+def _build_faction_alliance_map(data: object) -> dict[str, str]:
+    """Extract {factionID: alliance} from the source JSON's Units block."""
+    if not isinstance(data, dict):
+        return {}
+    units = data.get("Units")
+    if not isinstance(units, dict):
+        return {}
+    result: dict[str, str] = {}
+    for unit in units.values():
+        if not isinstance(unit, dict):
+            continue
+        fid = unit.get("factionID")
+        alliance = unit.get("alliance")
+        if fid and alliance and fid not in result:
+            result[fid] = alliance
+    return result
 
 
 _MAP_SIZE_RE = re.compile(r"(-?[\d.]+)\s*x\s*(-?[\d.]+)", re.IGNORECASE)
@@ -267,8 +290,10 @@ def _parse_map_size_km(raw: str) -> Optional[float]:
     return max(w, h)
 
 
-async def _cache_source_layers(source_name: str, layers) -> int:
+async def _cache_source_layers(source_name: str, layers,
+                               faction_alliance: dict[str, str] = None) -> int:
     """Parse and upsert each layer for a single source. Returns count cached."""
+    faction_alliance = faction_alliance or {}
     count = 0
     for layer in layers:
         raw_name = layer.get("rawName") or layer.get("Name", "")
@@ -325,6 +350,7 @@ async def _cache_source_layers(source_name: str, layers) -> int:
                         "defaultUnit": default_unit,
                         "availableOnTeams": available_on_teams,
                         "unitTypes": unit_types,
+                        "alliance": faction_alliance.get(fac_id, ""),
                     })
             elif isinstance(fac, str):
                 factions_data.append({
@@ -332,6 +358,7 @@ async def _cache_source_layers(source_name: str, layers) -> int:
                     "defaultUnit": "",
                     "availableOnTeams": [],
                     "unitTypes": [],
+                    "alliance": faction_alliance.get(fac, ""),
                 })
 
         # Extract team alliance restrictions
@@ -373,8 +400,12 @@ def get_factions_for_team(layer_data: dict, team: int,
     """
     alliances_key = f"team{team}_allowed_alliances"
     allowed_alliances = layer_data.get(alliances_key, [])
+    allowed_alliance_set = set(allowed_alliances) if allowed_alliances else set()
 
-    # Alliance → faction mapping
+    # Fallback alliance → faction mapping for cached rows that predate the
+    # per-faction alliance field. New caches store `alliance` directly on each
+    # faction (sourced from the JSON's Units block), which covers SuperMod
+    # (SU_*) and any other modded factions this map doesn't list.
     ALLIANCE_FACTIONS = {
         "BLUFOR": {"USA", "USMC", "BAF", "CAF", "ADF"},
         "REDFOR": {"RGF", "VDV", "PLA", "PLANMC", "PLAAGF"},
@@ -382,10 +413,10 @@ def get_factions_for_team(layer_data: dict, team: int,
         "PAC": {"PLA", "PLANMC", "PLAAGF"},
     }
 
-    allowed_faction_ids = set()
+    fallback_faction_ids = set()
     if allowed_alliances:
         for alliance in allowed_alliances:
-            allowed_faction_ids |= ALLIANCE_FACTIONS.get(alliance, set())
+            fallback_faction_ids |= ALLIANCE_FACTIONS.get(alliance, set())
 
     factions = layer_data.get("factions", [])
     seen_ids = set()
@@ -402,8 +433,13 @@ def get_factions_for_team(layer_data: dict, team: int,
                 continue
         if fac_id in seen_ids:
             continue
-        if allowed_alliances and fac_id not in allowed_faction_ids:
-            continue
+        if allowed_alliances:
+            fac_alliance = fac.get("alliance", "") if isinstance(fac, dict) else ""
+            if fac_alliance:
+                if fac_alliance not in allowed_alliance_set:
+                    continue
+            elif fac_id not in fallback_faction_ids:
+                continue
         if blacklisted_factions and fac_id in blacklisted_factions:
             continue
         if exclude_faction and fac_id == exclude_faction:
