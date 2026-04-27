@@ -243,6 +243,30 @@ async def fetch_and_cache_layers() -> int:
     return count
 
 
+_MAP_SIZE_RE = re.compile(r"(-?[\d.]+)\s*x\s*(-?[\d.]+)", re.IGNORECASE)
+
+
+def _parse_map_size_km(raw: str) -> Optional[float]:
+    """Parse '4.0x4.0 km' / '1.2x1.2 km' → max(width, height) in km.
+
+    Returns None for unparseable, zero, or otherwise unusable values. Negative
+    components (one source has '-4.1x4.1 km') are treated as their absolute
+    value — same magnitude, just a sign typo upstream.
+    """
+    if not raw:
+        return None
+    m = _MAP_SIZE_RE.search(raw)
+    if not m:
+        return None
+    try:
+        w, h = abs(float(m.group(1))), abs(float(m.group(2)))
+    except ValueError:
+        return None
+    if w == 0 or h == 0:
+        return None
+    return max(w, h)
+
+
 async def _cache_source_layers(source_name: str, layers) -> int:
     """Parse and upsert each layer for a single source. Returns count cached."""
     count = 0
@@ -332,6 +356,7 @@ async def _cache_source_layers(source_name: str, layers) -> int:
             factions=factions_data,
             team1_alliances=t1_alliances,
             team2_alliances=t2_alliances,
+            map_size_km=_parse_map_size_km(layer.get("mapSize", "")),
         )
         count += 1
 
@@ -638,34 +663,46 @@ async def handle_suggest_start(interaction: discord.Interaction):
     await _suggest_show_map_step(interaction, state, settings, lang, edit=False)
 
 
-# Lazy match anything up to the first " | " separator. Whitespace inside the
-# captured prefix is normalized away below so 'Going Dark' and 'GoingDark'
-# collapse into a single group (the supermod source uses both spellings).
-_MAP_PREFIX_RE = re.compile(r"^([^|]+?)\s*\|\s*(.+)$")
+# Map-size buckets in km (max layer size per map, since skirmish layers reuse
+# the mapId with a smaller area). Thresholds chosen so each bucket stays under
+# Discord's 25-option Select cap for both layers.json and spm_layers.json.
+_SIZE_BUCKETS: tuple[tuple[str, float], ...] = (
+    ("small", 3.0),    # < 3.0 km — skirmish / CQB
+    ("medium", 4.5),   # 3.0 ≤ size < 4.5 km — standard AAS
+    ("large", float("inf")),  # ≥ 4.5 km — full RAAS / big maps
+)
+_SIZE_BUCKET_KEYS = {
+    "small": "suggest.size_small",
+    "medium": "suggest.size_medium",
+    "large": "suggest.size_large",
+}
 
 
-def _group_maps_by_prefix(maps: list[str]) -> "dict[str, list[str]]":
-    """Group map names by their pipe-prefix.
+def _bucket_for_size(size_km: Optional[float]) -> str:
+    """Return the bucket key ('small'/'medium'/'large') for a map size in km.
+    Maps without a size fall into 'medium' as a safe default."""
+    if size_km is None:
+        return "medium"
+    for key, upper in _SIZE_BUCKETS:
+        if size_km < upper:
+            return key
+    return "large"
 
-    'GoingDark | Harju' → group 'GoingDark'; 'Going Dark | Harju' → also
-    'GoingDark' (whitespace normalized); 'SPM | Al Basrah' → 'SPM';
-    'Yehorivka' (no prefix) → 'Other'. Insertion order is preserved.
-    """
-    groups: dict[str, list[str]] = {}
+
+def _group_maps_by_size(maps: list[str], sizes: "dict[str, float]") -> "dict[str, list[str]]":
+    """Group map names by size bucket. Insertion order is small → medium → large
+    so the dropdowns appear in size order regardless of dict iteration."""
+    groups: dict[str, list[str]] = {key: [] for key, _ in _SIZE_BUCKETS}
     for m in maps:
-        match = _MAP_PREFIX_RE.match(m)
-        prefix = re.sub(r"\s+", "", match.group(1)) if match else "Other"
-        groups.setdefault(prefix, []).append(m)
+        groups[_bucket_for_size(sizes.get(m))].append(m)
     return groups
 
 
-def _build_map_picker_view(maps: list[str], lang: str) -> ui.View:
-    """Build the map-select view, splitting into per-prefix dropdowns when the
-    list exceeds Discord's 25-option limit on a single Select.
-
-    With ≤25 maps, returns a single MapSelectView (existing behavior).
-    With >25, returns a GroupedMapSelectView with one Select per prefix group.
-    Both variants include the map count in the dropdown placeholder.
+def _build_map_picker_view(maps: list[str], lang: str,
+                           sizes: "dict[str, float]") -> ui.View:
+    """Build the map-select view. With ≤25 maps a single dropdown is used;
+    with more, the maps are split into Small/Medium/Large dropdowns by their
+    canonical (largest-layer) size. Map counts are shown in every placeholder.
     """
     if len(maps) <= 25:
         options = [discord.SelectOption(label=m, value=m) for m in maps]
@@ -673,7 +710,7 @@ def _build_map_picker_view(maps: list[str], lang: str) -> ui.View:
         # "Select a map (25)" instead of "Select a map. (25)").
         placeholder = f"{t('suggest.select_map', lang).rstrip('.')} ({len(maps)})"
         return MapSelectView(options, lang, placeholder=placeholder)
-    groups = _group_maps_by_prefix(maps)
+    groups = _group_maps_by_size(maps, sizes)
     return GroupedMapSelectView(groups, lang)
 
 
@@ -695,7 +732,8 @@ async def _suggest_show_map_step(interaction: discord.Interaction, state: Sugges
             await interaction.response.send_message(msg, ephemeral=True)
         return
 
-    view = _build_map_picker_view(maps, lang)
+    sizes = db.get_map_sizes(allowed_sources=source_filter)
+    view = _build_map_picker_view(maps, lang, sizes)
     desc = t("suggest.select_map", lang)
     if state.source:
         desc = f"**{t('suggest.source_label', lang)}:** {state.source}\n{desc}"
@@ -744,33 +782,28 @@ class MapSelectView(ui.View):
 
 
 class GroupedMapSelectView(ui.View):
-    """Map picker with one MapSelect per prefix group. Used when the map list
+    """Map picker with one MapSelect per size bucket. Used when the map list
     exceeds Discord's 25-option-per-Select cap (typical for the supermod source,
-    which has 45 maps split across `GoingDark | …`, `SPM | …`, and standalone)."""
+    which has 43+ playable maps).
+
+    Buckets are always Small/Medium/Large (3 dropdowns), comfortably under the
+    5-component View cap.
+    """
 
     def __init__(self, groups: "dict[str, list[str]]", lang: str):
         super().__init__(timeout=120)
         self.lang = lang
-        # Discord caps a View at 5 components; one Select per row. With more
-        # than 5 prefix groups, fold the trailing groups into "Other" so the
-        # view still fits.
-        items = list(groups.items())
-        if len(items) > 5:
-            head = items[:4]
-            tail_maps: list[str] = []
-            for _, ms in items[4:]:
-                tail_maps.extend(ms)
-            items = head + [("Other", tail_maps)]
-        for prefix, group_maps in items:
+        for bucket_key, group_maps in groups.items():
             if not group_maps:
                 continue
+            label = t(_SIZE_BUCKET_KEYS[bucket_key], lang)
             if len(group_maps) > 25:
                 logger.warning(
-                    "Map group '%s' has %d maps; truncating to 25 (Discord Select limit).",
-                    prefix, len(group_maps),
+                    "Map size bucket '%s' has %d maps; truncating to 25 (Discord Select limit).",
+                    bucket_key, len(group_maps),
                 )
             options = [discord.SelectOption(label=m, value=m) for m in group_maps[:25]]
-            self.add_item(MapSelect(options, lang, placeholder=f"{prefix} ({len(group_maps)})"))
+            self.add_item(MapSelect(options, lang, placeholder=f"{label} ({len(group_maps)})"))
 
 
 class MapSelect(ui.Select):
@@ -3018,7 +3051,8 @@ async def cmd_history_add(interaction: discord.Interaction):
             t("general.error", lang, error="No maps available"), ephemeral=True)
         return
 
-    view = _build_map_picker_view(maps, lang)
+    sizes = db.get_map_sizes()
+    view = _build_map_picker_view(maps, lang, sizes)
     embed = discord.Embed(
         title=t("history.add_title", lang),
         description=t("suggest.select_map", lang),

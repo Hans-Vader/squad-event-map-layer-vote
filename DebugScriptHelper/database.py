@@ -123,6 +123,7 @@ def init_db():
             map_id                  TEXT    NOT NULL,
             gamemode                TEXT    NOT NULL,
             layer_version           TEXT,
+            map_size_km             REAL,
             factions_json           TEXT    NOT NULL DEFAULT '[]',
             team1_allowed_alliances TEXT    NOT NULL DEFAULT '[]',
             team2_allowed_alliances TEXT    NOT NULL DEFAULT '[]',
@@ -237,7 +238,8 @@ def _source_filter(allowed_sources: Optional[list[str]], prefix: str = " AND ") 
 
 def upsert_layer(raw_name: str, source: str, map_name: str, map_id: str, gamemode: str,
                  layer_version: Optional[str], factions: list,
-                 team1_alliances: list, team2_alliances: list):
+                 team1_alliances: list, team2_alliances: list,
+                 map_size_km: Optional[float] = None):
     """Insert or update a single layer in the cache.
 
     Layers are uniquely identified by (raw_name, source) — the same rawName
@@ -248,17 +250,20 @@ def upsert_layer(raw_name: str, source: str, map_name: str, map_id: str, gamemod
         conn.execute(
             """INSERT INTO layer_cache
                (raw_name, source, map_name, map_id, gamemode, layer_version,
-                factions_json, team1_allowed_alliances, team2_allowed_alliances, cached_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                map_size_km, factions_json, team1_allowed_alliances,
+                team2_allowed_alliances, cached_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(raw_name, source) DO UPDATE SET
                  map_name=excluded.map_name, map_id=excluded.map_id,
                  gamemode=excluded.gamemode, layer_version=excluded.layer_version,
+                 map_size_km=excluded.map_size_km,
                  factions_json=excluded.factions_json,
                  team1_allowed_alliances=excluded.team1_allowed_alliances,
                  team2_allowed_alliances=excluded.team2_allowed_alliances,
                  cached_at=excluded.cached_at""",
             (raw_name, source, map_name, map_id, gamemode, layer_version,
-             json.dumps(factions), json.dumps(team1_alliances), json.dumps(team2_alliances)),
+             map_size_km, json.dumps(factions),
+             json.dumps(team1_alliances), json.dumps(team2_alliances)),
         )
     conn.close()
 
@@ -401,6 +406,22 @@ def get_unique_gamemodes(allowed_sources: Optional[list[str]] = None) -> list[st
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [r[0] for r in rows]
+
+
+def get_map_sizes(allowed_sources: Optional[list[str]] = None) -> "dict[str, float]":
+    """Return {map_name: max_layer_size_km} from the cache.
+
+    A map's canonical size is taken as the largest size among its layers, since
+    skirmish/seed sub-layers reuse the same mapId with a smaller playable area.
+    Maps with no usable size data (all NULL) are omitted.
+    """
+    where, params = _source_filter(allowed_sources, prefix=" WHERE ")
+    where = (where + " AND " if where else " WHERE ") + "map_size_km IS NOT NULL"
+    sql = f"SELECT map_name, MAX(map_size_km) FROM layer_cache{where} GROUP BY map_name"
+    conn = _get_conn()
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return {name: size for name, size in rows if size is not None}
 
 
 def get_unique_sources() -> list[str]:

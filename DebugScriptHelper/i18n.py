@@ -184,6 +184,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Wähle eine Map aus.",
         "en": "Select a map.",
     },
+    "suggest.size_small": {
+        "de": "Klein",
+        "en": "Small",
+    },
+    "suggest.size_medium": {
+        "de": "Mittel",
+        "en": "Medium",
+    },
+    "suggest.size_large": {
+        "de": "Groß",
+        "en": "Large",
+    },
     "suggest.select_mode": {
         "de": "Wähle einen Spielmodus.",
         "en": "Select a game mode.",
