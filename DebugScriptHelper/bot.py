@@ -550,6 +550,20 @@ def _resolve_faction_name(layer_data: dict, faction_id: str, team: int) -> str:
     return entry.get("factionName", "") or ""
 
 
+def _faction_select_options(factions: list[dict]) -> list[discord.SelectOption]:
+    """Build dropdown options for a list of factions (label=factionId,
+    description=factionName). Caps at Discord's 25-option limit; description
+    is truncated to the 100-char limit and omitted when empty."""
+    return [
+        discord.SelectOption(
+            label=f["factionId"],
+            value=f["factionId"],
+            description=(f.get("factionName") or "")[:100] or None,
+        )
+        for f in factions[:25]
+    ]
+
+
 def extract_unit_prefix(default_unit: str, faction_id: str) -> Optional[str]:
     """Extract the middle token from a defaultUnit string.
 
@@ -968,14 +982,7 @@ class ModeSelect(ui.Select):
             )
             return
 
-        options = [
-            discord.SelectOption(
-                label=f["factionId"],
-                value=f["factionId"],
-                description=(f.get("factionName") or "")[:100] or None,
-            )
-            for f in factions[:25]
-        ]
+        options = _faction_select_options(factions)
 
         mode_str = f"{state.gamemode} {state.layer_version}".strip() if state.layer_version else state.gamemode
         view = Team1FactionSelectView(options, lang)
@@ -1085,14 +1092,7 @@ async def _show_team2_faction_select(interaction: discord.Interaction,
         )
         return
 
-    options = [
-        discord.SelectOption(
-            label=f["factionId"],
-            value=f["factionId"],
-            description=(f.get("factionName") or "")[:100] or None,
-        )
-        for f in factions[:25]
-    ]
+    options = _faction_select_options(factions)
 
     mode_str = f"{state.gamemode} {state.layer_version}".strip() if state.layer_version else state.gamemode
     view = Team2FactionSelectView(options, lang)

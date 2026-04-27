@@ -170,8 +170,8 @@ def build_squadcalc_url(suggestion: dict) -> Optional[str]:
     return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
 
 
-def _build_supermod_tooltip(suggestion: dict) -> str:
-    """One-line tooltip text for non-main-source layers: map + mode + factionNames."""
+def _build_layer_tooltip(suggestion: dict) -> str:
+    """One-line tooltip text: map + mode + full faction names."""
     map_name = suggestion.get("map_name", "?")
     gamemode = suggestion.get("gamemode", "?")
     version = suggestion.get("layer_version", "")
@@ -190,27 +190,30 @@ def _build_supermod_tooltip(suggestion: dict) -> str:
 # non-main-source layers — Discord requires a URL on masked links, but we
 # don't want to send users to SquadCalc since it doesn't recognize SPM/SU
 # maps or factions. discord.com keeps the click inside the user's Discord.
-_TOOLTIP_NOOP_URL = "https://discord.com/"
+_TOOLTIP_NOOP_URL = SQUADCALC_BASE_URL
 
 
 def build_map_icon_markdown(suggestion: dict) -> str:
-    """Render the 🗺️ map icon for embeds, with source-aware behaviour.
+    """Render the 🗺️ map icon for embeds.
 
-    - Main-source layers: link to the parameterized SquadCalc URL.
-    - Non-main sources: no SquadCalc link; instead a hover tooltip on the
-      icon shows the map + version + full faction names.
-    - SquadCalc disabled and main source: plain emoji, no link.
+    Both main and SPM/SU layers go through the same link template; only the
+    URL target differs (SquadCalc when usable, a no-op Discord URL otherwise).
+    The hover tooltip — map + version + full faction names — is identical
+    across sources. Falls back to a plain emoji when no URL is available
+    (e.g. SquadCalc disabled and main source).
     """
-    url = build_squadcalc_url(suggestion)
-    if url:
-        return f"[🗺️]({url})"
+    url = build_squadcalc_url(suggestion) or _fallback_icon_url(suggestion)
+    if not url:
+        return "🗺️"
+    return f'[🗺️]({url} "{_build_layer_tooltip(suggestion)}")'
 
+
+def _fallback_icon_url(suggestion: dict) -> Optional[str]:
+    """No-op masked-link target for non-main sources, or None if main."""
     source = suggestion.get("source") or ""
     if source and source != SQUADCALC_COMPATIBLE_SOURCE:
-        tooltip = _build_supermod_tooltip(suggestion)
-        return f'[🗺️]({_TOOLTIP_NOOP_URL} "{tooltip}")'
-
-    return "🗺️"
+        return _TOOLTIP_NOOP_URL
+    return None
 
 
 def format_suggestion_entry(index: int, suggestion: dict) -> str:
