@@ -628,19 +628,23 @@ async def handle_suggest_start(interaction: discord.Interaction):
     await _suggest_show_map_step(interaction, state, settings, lang, edit=False)
 
 
-_MAP_PREFIX_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)\s*\|\s*(.+)$")
+# Lazy match anything up to the first " | " separator. Whitespace inside the
+# captured prefix is normalized away below so 'Going Dark' and 'GoingDark'
+# collapse into a single group (the supermod source uses both spellings).
+_MAP_PREFIX_RE = re.compile(r"^([^|]+?)\s*\|\s*(.+)$")
 
 
 def _group_maps_by_prefix(maps: list[str]) -> "dict[str, list[str]]":
     """Group map names by their pipe-prefix.
 
-    'GoingDark | Harju' → group 'GoingDark'; 'SPM | Al Basrah' → group 'SPM';
-    'Yehorivka' (no prefix) → group 'Other'. Insertion order is preserved.
+    'GoingDark | Harju' → group 'GoingDark'; 'Going Dark | Harju' → also
+    'GoingDark' (whitespace normalized); 'SPM | Al Basrah' → 'SPM';
+    'Yehorivka' (no prefix) → 'Other'. Insertion order is preserved.
     """
     groups: dict[str, list[str]] = {}
     for m in maps:
         match = _MAP_PREFIX_RE.match(m)
-        prefix = match.group(1) if match else "Other"
+        prefix = re.sub(r"\s+", "", match.group(1)) if match else "Other"
         groups.setdefault(prefix, []).append(m)
     return groups
 
@@ -651,10 +655,14 @@ def _build_map_picker_view(maps: list[str], lang: str) -> ui.View:
 
     With ≤25 maps, returns a single MapSelectView (existing behavior).
     With >25, returns a GroupedMapSelectView with one Select per prefix group.
+    Both variants include the map count in the dropdown placeholder.
     """
     if len(maps) <= 25:
         options = [discord.SelectOption(label=m, value=m) for m in maps]
-        return MapSelectView(options, lang)
+        # Append count to the localized prompt (strip trailing period so we get
+        # "Select a map (25)" instead of "Select a map. (25)").
+        placeholder = f"{t('suggest.select_map', lang).rstrip('.')} ({len(maps)})"
+        return MapSelectView(options, lang, placeholder=placeholder)
     groups = _group_maps_by_prefix(maps)
     return GroupedMapSelectView(groups, lang)
 
@@ -717,10 +725,11 @@ class SourceSelect(ui.Select):
 
 
 class MapSelectView(ui.View):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
+    def __init__(self, options: list[discord.SelectOption], lang: str,
+                 placeholder: Optional[str] = None):
         super().__init__(timeout=120)
         self.lang = lang
-        select = MapSelect(options, lang)
+        select = MapSelect(options, lang, placeholder=placeholder)
         self.add_item(select)
 
 
