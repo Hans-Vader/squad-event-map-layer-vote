@@ -7,6 +7,7 @@ All server-specific settings (organizer role, blacklists, language, etc.)
 are stored per-guild in the database and managed via /setup and /config_* commands.
 """
 
+import json
 import os
 import logging
 from dotenv import load_dotenv
@@ -41,11 +42,35 @@ if EVENT_CRITICAL_WINDOW <= EVENT_CHECK_INTERVAL:
         f"EVENT_CHECK_INTERVAL ({EVENT_CHECK_INTERVAL}s)."
     )
 
-# ── Layer data source ─────────────────────────────────────────────────────
-LAYERS_JSON_URL = os.getenv(
-    "LAYERS_JSON_URL",
-    "https://raw.githubusercontent.com/fantinodavide/SquadLayerList/refs/heads/main/layers.json",
+# ── Layer data source(s) ──────────────────────────────────────────────────
+# LAYERS_JSON_URL accepts:
+#   • a single URL                       → LAYERS_JSON_URL=https://a.com/layers.json
+#   • a comma-separated list             → LAYERS_JSON_URL=https://a.com/x.json,https://b.com/y.json
+#   • a JSON array (for URLs with commas) → LAYERS_JSON_URL=["https://a.com/x.json","https://b.com/y.json"]
+# When the same rawName appears in multiple sources, the source listed later wins.
+_DEFAULT_LAYERS_JSON_URL = (
+    "https://raw.githubusercontent.com/fantinodavide/SquadLayerList/refs/heads/main/layers.json"
 )
+
+
+def _parse_layers_json_urls(raw: str) -> list[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return [_DEFAULT_LAYERS_JSON_URL]
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("LAYERS_JSON_URL looks like JSON but failed to parse; falling back to comma-split")
+        else:
+            if isinstance(parsed, list):
+                urls = [str(u).strip() for u in parsed if str(u).strip()]
+                if urls:
+                    return urls
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
+LAYERS_JSON_URLS = _parse_layers_json_urls(os.getenv("LAYERS_JSON_URL", ""))
 
 # ── SquadCalc link in embeds ──────────────────────────────────────────────
 SQUADCALC_BASE_URL = os.getenv("SQUADCALC_BASE_URL", "").rstrip("/")

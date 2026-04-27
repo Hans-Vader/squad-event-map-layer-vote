@@ -21,7 +21,7 @@ from discord import app_commands, ui
 from discord.ext import commands
 
 import database as db
-from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_FAST, EVENT_CRITICAL_WINDOW, LAYERS_JSON_URL, DEBUG_MODE
+from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_FAST, EVENT_CRITICAL_WINDOW, LAYERS_JSON_URLS, DEBUG_MODE
 from i18n import t
 from utils import (
     has_organizer_role, is_guild_admin,
@@ -185,21 +185,48 @@ async def check_admin(interaction: discord.Interaction) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def fetch_and_cache_layers() -> int:
-    """Fetch layers.json from GitHub and populate the layer_cache table.
+    """Fetch layers.json from each configured source URL and populate layer_cache.
 
-    Returns the number of layers cached.
+    Sources that fail (network error, non-200, or malformed JSON) are logged and
+    skipped. When the same rawName appears in multiple sources, the source listed
+    later in LAYERS_JSON_URLS overrides earlier ones — so custom URLs appended to
+    the list can override default entries.
+
+    Returns the number of unique layers cached. Raises if no source returned data.
     """
+    fetched: list[tuple[str, object]] = []
     async with aiohttp.ClientSession() as session:
-        async with session.get(LAYERS_JSON_URL) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"HTTP {resp.status} fetching layers.json")
-            data = await resp.json(content_type=None)
+        for url in LAYERS_JSON_URLS:
+            try:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        logger.warning("layers.json HTTP %s from %s — skipping", resp.status, url)
+                        continue
+                    fetched.append((url, await resp.json(content_type=None)))
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, ValueError) as e:
+                logger.warning("layers.json fetch failed from %s: %s — skipping", url, e)
+
+    if not fetched:
+        raise RuntimeError("No layer sources returned data — cache not refreshed")
+
+    # Dedupe by rawName across sources; later sources win.
+    unique: dict[str, dict] = {}
+    for source_url, data in fetched:
+        layers_list = data.get("Maps", data) if isinstance(data, dict) else data
+        if not isinstance(layers_list, list):
+            logger.warning("layers.json from %s did not contain a list — skipping", source_url)
+            continue
+        for layer in layers_list:
+            if not isinstance(layer, dict):
+                continue
+            raw_name = layer.get("rawName") or layer.get("Name", "")
+            if raw_name:
+                unique[raw_name] = layer
 
     db.clear_layer_cache()
     count = 0
 
-    layers_list = data.get("Maps", data) if isinstance(data, dict) else data
-    for layer in layers_list:
+    for layer in unique.values():
         raw_name = layer.get("rawName") or layer.get("Name", "")
         map_name = _MAP_NAME_OVERRIDES.get(
             layer.get("mapName") or layer.get("Map", ""),
