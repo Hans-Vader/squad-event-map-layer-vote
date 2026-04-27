@@ -170,15 +170,47 @@ def build_squadcalc_url(suggestion: dict) -> Optional[str]:
     return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
 
 
-def build_map_icon_markdown(suggestion: dict) -> str:
-    """Render the 🗺️ map icon as a Discord link when SquadCalc applies.
+def _build_supermod_tooltip(suggestion: dict) -> str:
+    """One-line tooltip text for non-main-source layers: map + mode + factionNames."""
+    map_name = suggestion.get("map_name", "?")
+    gamemode = suggestion.get("gamemode", "?")
+    version = suggestion.get("layer_version", "")
+    mode_str = f"{gamemode} {version}".strip() if version else gamemode
 
-    Only main-source layers get a SquadCalc link — SPM/SU and other modded
-    sources show the plain emoji, since SquadCalc doesn't recognize their
-    map/faction params.
+    t1_name = suggestion.get("team1_faction_name") or suggestion.get("team1_faction") or "?"
+    t2_name = suggestion.get("team2_faction_name") or suggestion.get("team2_faction") or "?"
+
+    text = f"{map_name} {mode_str} — {t1_name} vs {t2_name}"
+    # Markdown link titles are quoted with `"`; replace any embedded quotes so
+    # the link doesn't break (e.g. SU_IRGC's name contains "Saberin Unit").
+    return text.replace('"', "'")
+
+
+# No-op masked-link target used to attach a hover tooltip to the 🗺 icon for
+# non-main-source layers — Discord requires a URL on masked links, but we
+# don't want to send users to SquadCalc since it doesn't recognize SPM/SU
+# maps or factions. discord.com keeps the click inside the user's Discord.
+_TOOLTIP_NOOP_URL = "https://discord.com/"
+
+
+def build_map_icon_markdown(suggestion: dict) -> str:
+    """Render the 🗺️ map icon for embeds, with source-aware behaviour.
+
+    - Main-source layers: link to the parameterized SquadCalc URL.
+    - Non-main sources: no SquadCalc link; instead a hover tooltip on the
+      icon shows the map + version + full faction names.
+    - SquadCalc disabled and main source: plain emoji, no link.
     """
     url = build_squadcalc_url(suggestion)
-    return f"[🗺️]({url})" if url else "🗺️"
+    if url:
+        return f"[🗺️]({url})"
+
+    source = suggestion.get("source") or ""
+    if source and source != SQUADCALC_COMPATIBLE_SOURCE:
+        tooltip = _build_supermod_tooltip(suggestion)
+        return f'[🗺️]({_TOOLTIP_NOOP_URL} "{tooltip}")'
+
+    return "🗺️"
 
 
 def format_suggestion_entry(index: int, suggestion: dict) -> str:

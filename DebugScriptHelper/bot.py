@@ -1405,12 +1405,13 @@ async def handle_admin_panel(interaction: discord.Interaction):
         color=discord.Color.dark_red(),
     )
 
-    view = AdminPanelView(phase, lang, record["db_id"])
+    suggestion_count = len(event.get("suggestions", []))
+    view = AdminPanelView(phase, lang, record["db_id"], suggestion_count)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 class AdminPanelView(ui.View):
-    def __init__(self, phase: str, lang: str, db_id: int):
+    def __init__(self, phase: str, lang: str, db_id: int, suggestion_count: int = 0):
         super().__init__(timeout=120)
         self.lang = lang
         self.db_id = db_id
@@ -1423,6 +1424,12 @@ class AdminPanelView(ui.View):
             self.add_item(AdminButton("select_for_vote", t("admin.select_for_vote", lang), discord.ButtonStyle.primary, "🗳️"))
         elif phase == "voting":
             self.add_item(AdminButton("end_vote", t("admin.end_vote", lang), discord.ButtonStyle.danger, "🏁"))
+
+        # Removing a suggestion only makes sense before the poll is live.
+        if phase in ("suggestions_open", "suggestions_closed") and suggestion_count > 0:
+            self.add_item(AdminButton("remove_suggestion",
+                                      t("admin.remove_suggestion", lang),
+                                      discord.ButtonStyle.secondary, "✂️"))
 
         self.add_item(AdminButton("delete_event", t("admin.delete_event", lang), discord.ButtonStyle.danger, "🗑️"))
 
@@ -1443,6 +1450,8 @@ class AdminButton(ui.Button):
             await admin_select_for_vote(interaction)
         elif self.action == "end_vote":
             await admin_end_vote(interaction)
+        elif self.action == "remove_suggestion":
+            await admin_remove_suggestion(interaction)
         elif self.action == "delete_event":
             await admin_delete_event(interaction)
 
@@ -2012,6 +2021,178 @@ async def _do_delete_event(interaction: discord.Interaction):
         view=None,
     )
     await send_to_log_channel("Event deleted", guild_id=interaction.guild_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADMIN: Remove a single suggestion
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Discord caps each Select at 25 options and a View at 5 action rows, so a
+# single picker view holds up to 5 × 25 = 125 suggestions.
+_REMOVE_PICKER_OPTIONS_PER_SELECT = 25
+_REMOVE_PICKER_MAX_SUGGESTIONS = 5 * _REMOVE_PICKER_OPTIONS_PER_SELECT
+
+
+def _remove_option_label(s: dict) -> str:
+    """Build a Discord-safe (≤100 char) option label for a suggestion."""
+    user = s.get("user_name", "?") or "?"
+    layer = format_layer_short(s)
+    label = f"{user} — {layer}"
+    if len(label) > 100:
+        label = label[:97] + "..."
+    return label
+
+
+class RemoveSuggestionView(ui.View):
+    """Picker view that chunks suggestions across multiple Select dropdowns.
+
+    Discord caps each Select at 25 options, so we split the suggestion list
+    into 25-sized chunks. Each chunk becomes its own Select on its own row.
+    """
+
+    def __init__(self, suggestions: list[dict], lang: str):
+        super().__init__(timeout=120)
+        chunks = [
+            suggestions[i:i + _REMOVE_PICKER_OPTIONS_PER_SELECT]
+            for i in range(0, len(suggestions), _REMOVE_PICKER_OPTIONS_PER_SELECT)
+        ]
+        for idx, chunk in enumerate(chunks[:5]):
+            self.add_item(RemoveSuggestionSelect(chunk, lang, idx, len(chunks)))
+
+
+class RemoveSuggestionSelect(ui.Select):
+    def __init__(self, chunk: list[dict], lang: str, idx: int, total: int):
+        if total > 1:
+            placeholder = t("admin.remove_select_chunk", lang,
+                            current=idx + 1, total=total)
+        else:
+            placeholder = t("admin.remove_select", lang)
+
+        options = [
+            discord.SelectOption(
+                label=_remove_option_label(s),
+                value=s["id"],
+                description=(s.get("user_name") or "")[:100] or None,
+            )
+            for s in chunk if s.get("id")
+        ]
+        super().__init__(placeholder=placeholder, options=options,
+                         min_values=1, max_values=1)
+        self.lang = lang
+
+    async def callback(self, interaction: discord.Interaction):
+        await admin_do_remove_suggestion(interaction, self.values[0])
+
+
+async def admin_remove_suggestion(interaction: discord.Interaction):
+    """Render the picker view for choosing a suggestion to remove."""
+    settings = db.get_guild_settings(interaction.guild_id)
+    lang = settings.get("language", "en") if settings else "en"
+
+    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    if not record:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang),
+                                color=discord.Color.red()),
+            view=None,
+        )
+        return
+
+    suggestions = record["event"].get("suggestions", [])
+    if not suggestions:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("admin.no_suggestions", lang),
+                                color=discord.Color.orange()),
+            view=None,
+        )
+        return
+
+    visible = suggestions[:_REMOVE_PICKER_MAX_SUGGESTIONS]
+    embed = discord.Embed(
+        title=t("admin.remove_suggestion", lang),
+        description=t("admin.remove_prompt", lang, count=len(visible)),
+        color=discord.Color.dark_red(),
+    )
+    await interaction.response.edit_message(
+        embed=embed,
+        view=RemoveSuggestionView(visible, lang),
+    )
+
+
+async def admin_do_remove_suggestion(interaction: discord.Interaction,
+                                     suggestion_id: str):
+    """Remove the chosen suggestion, refresh the event embed, and re-render
+    the picker so the admin can remove more without reopening the panel.
+    """
+    settings = db.get_guild_settings(interaction.guild_id)
+    lang = settings.get("language", "en") if settings else "en"
+
+    removed: Optional[dict] = None
+    remaining: list[dict] = []
+    lock = _get_guild_lock(interaction.guild_id)
+    async with lock:
+        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        if not record:
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=t("event.no_event", lang),
+                                    color=discord.Color.red()),
+                view=None,
+            )
+            return
+
+        event = record["event"]
+        new_list: list[dict] = []
+        for s in event.get("suggestions", []):
+            if removed is None and s.get("id") == suggestion_id:
+                removed = s
+                continue
+            new_list.append(s)
+
+        if removed is None:
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=t("admin.remove_not_found", lang),
+                                    color=discord.Color.orange()),
+                view=None,
+            )
+            return
+
+        event["suggestions"] = new_list
+        remaining = new_list
+        db.save_event(record["db_id"], event)
+
+    # Refresh the public event embed. The per-user suggestion limit is
+    # computed live from event["suggestions"], so removal automatically frees
+    # the slot for the original suggester.
+    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+
+    await send_to_log_channel(
+        f"Suggestion removed by {interaction.user.display_name}: "
+        f"{format_layer_short(removed)} (originally by {removed.get('user_name', '?')})",
+        guild_id=interaction.guild_id,
+    )
+
+    removed_line = t("admin.suggestion_removed", lang,
+                     layer=format_layer_short(removed))
+    if remaining:
+        visible = remaining[:_REMOVE_PICKER_MAX_SUGGESTIONS]
+        embed = discord.Embed(
+            title=t("admin.remove_suggestion", lang),
+            description=(
+                f"✅ {removed_line}\n\n"
+                f"{t('admin.remove_prompt', lang, count=len(visible))}"
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(
+            embed=embed,
+            view=RemoveSuggestionView(visible, lang),
+        )
+    else:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=f"✅ {removed_line}",
+                                color=discord.Color.green()),
+            view=None,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

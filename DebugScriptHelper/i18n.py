@@ -596,6 +596,34 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Anzahl zufälliger Layers",
         "en": "Number of random layers",
     },
+    "admin.remove_suggestion": {
+        "de": "Vorschlag entfernen",
+        "en": "Remove Suggestion",
+    },
+    "admin.remove_select": {
+        "de": "Zu entfernenden Vorschlag auswählen",
+        "en": "Select a suggestion to remove",
+    },
+    "admin.remove_select_chunk": {
+        "de": "Zu entfernenden Vorschlag auswählen ({current}/{total})",
+        "en": "Select a suggestion to remove ({current}/{total})",
+    },
+    "admin.remove_prompt": {
+        "de": "Wähle einen der **{count}** Vorschläge zum Entfernen aus.",
+        "en": "Pick one of the **{count}** suggestions to remove.",
+    },
+    "admin.no_suggestions": {
+        "de": "Keine Vorschläge vorhanden.",
+        "en": "There are no suggestions to remove.",
+    },
+    "admin.suggestion_removed": {
+        "de": "Vorschlag entfernt: {layer}",
+        "en": "Suggestion removed: {layer}",
+    },
+    "admin.remove_not_found": {
+        "de": "Vorschlag nicht gefunden (möglicherweise bereits entfernt).",
+        "en": "Suggestion not found (it may have already been removed).",
+    },
 }
 
 
