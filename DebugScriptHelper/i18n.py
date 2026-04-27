@@ -102,6 +102,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Rollen-Einstellungen aktualisiert ({type}).",
         "en": "Role settings updated ({type}).",
     },
+    "config.sources_prompt": {
+        "de": "Wähle die Layer-Quellen aus, die beim Erstellen von Events angeboten werden sollen ({count} verfügbar).",
+        "en": "Select which layer sources are offered when creating events ({count} available).",
+    },
+    "config.sources_placeholder": {
+        "de": "Layer-Quellen auswählen",
+        "en": "Select layer sources",
+    },
+    "config.sources_updated": {
+        "de": "Erlaubte Layer-Quellen aktualisiert: {sources}",
+        "en": "Allowed layer sources updated: {sources}",
+    },
 
     # ── Layer cache ───────────────────────────────────────────────────────
     "cache.refreshing": {
@@ -138,11 +150,35 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Kein aktives Event in diesem Kanal.",
         "en": "No active event in this channel.",
     },
+    "event.select_sources_title": {
+        "de": "Layer-Quellen auswählen",
+        "en": "Select layer sources",
+    },
+    "event.select_sources_desc": {
+        "de": "Wähle, welche Layer-Quellen die Nutzer für dieses Event vorschlagen dürfen, dann bestätige.",
+        "en": "Select which layer sources users may suggest from for this event, then confirm.",
+    },
+    "event.select_sources_placeholder": {
+        "de": "Quellen für dieses Event auswählen",
+        "en": "Select sources for this event",
+    },
+    "event.select_sources_required": {
+        "de": "Bitte wähle mindestens eine Layer-Quelle aus.",
+        "en": "Please select at least one layer source.",
+    },
 
     # ── Suggestions ───────────────────────────────────────────────────────
     "suggest.phase_title": {
         "de": "Layer-Vorschlag",
         "en": "Layer Suggestion",
+    },
+    "suggest.select_source": {
+        "de": "Wähle eine Layer-Quelle.",
+        "en": "Select a layer source.",
+    },
+    "suggest.source_label": {
+        "de": "Quelle",
+        "en": "Source",
     },
     "suggest.select_map": {
         "de": "Wähle eine Map aus.",

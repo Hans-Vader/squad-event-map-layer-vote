@@ -21,7 +21,7 @@ from discord import app_commands, ui
 from discord.ext import commands
 
 import database as db
-from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_FAST, EVENT_CRITICAL_WINDOW, LAYERS_JSON_URLS, DEBUG_MODE
+from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_FAST, EVENT_CRITICAL_WINDOW, LAYERS_JSON_SOURCES, DEBUG_MODE
 from i18n import t
 from utils import (
     has_organizer_role, is_guild_admin,
@@ -187,35 +187,50 @@ async def check_admin(interaction: discord.Interaction) -> bool:
 async def fetch_and_cache_layers() -> int:
     """Fetch layers.json from each configured source URL and populate layer_cache.
 
-    Sources that fail (network error, non-200, or malformed JSON) are logged and
-    skipped. When the same rawName appears in multiple sources, the source listed
-    later in LAYERS_JSON_URLS overrides earlier ones — so custom URLs appended to
-    the list can override default entries.
+    Each source is stored independently in the cache, tagged with its derived
+    name (the path segment immediately before /layers.json — e.g. "main",
+    "supermod"). Sources that fail (network error, non-200, malformed JSON) are
+    logged and skipped. Within a single source, layers with duplicate rawName
+    are deduped (last wins).
 
-    Returns the number of unique layers cached. Raises if no source returned data.
+    Returns the total number of cached layer rows across all sources.
+    Raises if no source returned data — leaves the existing cache untouched.
     """
-    fetched: list[tuple[str, object]] = []
+    fetched: list[tuple[str, str, object]] = []  # (source_name, url, payload)
     async with aiohttp.ClientSession() as session:
-        for url in LAYERS_JSON_URLS:
+        for source_name, url in LAYERS_JSON_SOURCES:
             try:
                 async with session.get(url) as resp:
                     if resp.status != 200:
-                        logger.warning("layers.json HTTP %s from %s — skipping", resp.status, url)
+                        logger.warning(
+                            "layers.json HTTP %s from source '%s' (%s) — skipping",
+                            resp.status, source_name, url,
+                        )
                         continue
-                    fetched.append((url, await resp.json(content_type=None)))
+                    fetched.append((source_name, url, await resp.json(content_type=None)))
             except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, ValueError) as e:
-                logger.warning("layers.json fetch failed from %s: %s — skipping", url, e)
+                logger.warning(
+                    "layers.json fetch failed from source '%s' (%s): %s — skipping",
+                    source_name, url, e,
+                )
 
     if not fetched:
         raise RuntimeError("No layer sources returned data — cache not refreshed")
 
-    # Dedupe by rawName across sources; later sources win.
-    unique: dict[str, dict] = {}
-    for source_url, data in fetched:
+    db.clear_layer_cache()
+    count = 0
+
+    for source_name, source_url, data in fetched:
         layers_list = data.get("Maps", data) if isinstance(data, dict) else data
         if not isinstance(layers_list, list):
-            logger.warning("layers.json from %s did not contain a list — skipping", source_url)
+            logger.warning(
+                "layers.json from source '%s' (%s) did not contain a list — skipping",
+                source_name, source_url,
+            )
             continue
+
+        # Within a single source, dedupe by rawName (last wins).
+        unique: dict[str, dict] = {}
         for layer in layers_list:
             if not isinstance(layer, dict):
                 continue
@@ -223,10 +238,15 @@ async def fetch_and_cache_layers() -> int:
             if raw_name:
                 unique[raw_name] = layer
 
-    db.clear_layer_cache()
-    count = 0
+        count += await _cache_source_layers(source_name, unique.values())
 
-    for layer in unique.values():
+    return count
+
+
+async def _cache_source_layers(source_name: str, layers) -> int:
+    """Parse and upsert each layer for a single source. Returns count cached."""
+    count = 0
+    for layer in layers:
         raw_name = layer.get("rawName") or layer.get("Name", "")
         map_name = _MAP_NAME_OVERRIDES.get(
             layer.get("mapName") or layer.get("Map", ""),
@@ -312,6 +332,7 @@ async def fetch_and_cache_layers() -> int:
 
         db.upsert_layer(
             raw_name=raw_name,
+            source=source_name,
             map_name=map_name,
             map_id=map_id,
             gamemode=gamemode,
@@ -517,13 +538,17 @@ class EventActionView(ui.View):
 
 class SuggestState:
     """Tracks the state of a suggestion flow for a user."""
-    __slots__ = ("guild_id", "channel_id", "map_name", "mode_raw_name",
+    __slots__ = ("guild_id", "channel_id", "source", "map_name", "mode_raw_name",
                  "gamemode", "layer_version", "team1_faction", "team1_unit",
                  "team2_faction", "team2_unit", "layer_data", "flow")
 
     def __init__(self, guild_id: int, channel_id: int, flow: str = "suggest"):
         self.guild_id = guild_id
         self.channel_id = channel_id
+        # The layer source the user is suggesting from (e.g. "main", "supermod").
+        # Empty string acts as "no source filter" — used for legacy events that
+        # predate per-source caching.
+        self.source = ""
         self.map_name = None
         self.mode_raw_name = None
         self.gamemode = None
@@ -540,6 +565,18 @@ class SuggestState:
 
 # Active suggestion sessions: user_id -> SuggestState
 _suggest_sessions: dict[int, SuggestState] = {}
+
+
+def _resolve_event_sources(event: dict) -> list[str]:
+    """Return the list of source names a user may pick from for this event.
+
+    Falls back to the set of distinct sources currently in the layer cache when
+    the event has no explicit `allowed_sources` (i.e. it predates this feature).
+    """
+    explicit = event.get("allowed_sources") or []
+    if explicit:
+        return list(explicit)
+    return db.get_unique_sources()
 
 
 async def handle_suggest_start(interaction: discord.Interaction):
@@ -581,25 +618,80 @@ async def handle_suggest_start(interaction: discord.Interaction):
     state = SuggestState(interaction.guild_id, interaction.channel_id)
     _suggest_sessions[interaction.user.id] = state
 
-    # Build map dropdown
-    blacklisted_maps = settings.get("blacklisted_maps", [])
-    maps = db.get_unique_maps(excluded_maps=blacklisted_maps)
-
-    if not maps:
-        await interaction.response.send_message(
-            t("general.error", lang, error="No maps available"), ephemeral=True)
+    sources = _resolve_event_sources(event)
+    if len(sources) > 1:
+        # Show source picker first; the map step runs after the user picks one.
+        options = [discord.SelectOption(label=s, value=s) for s in sources[:25]]
+        view = SourceSelectView(options, lang)
+        embed = discord.Embed(
+            title=t("suggest.phase_title", lang),
+            description=t("suggest.select_source", lang),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return
 
-    # Discord Select Menu max 25 options
-    options = [discord.SelectOption(label=m, value=m) for m in maps[:25]]
+    # Single source (or none recorded → no filter): skip the picker.
+    state.source = sources[0] if sources else ""
+    await _suggest_show_map_step(interaction, state, settings, lang, edit=False)
 
+
+async def _suggest_show_map_step(interaction: discord.Interaction, state: SuggestState,
+                                 settings: dict, lang: str, edit: bool):
+    """Render the map-select dropdown. Used after source pick or when only one source exists."""
+    blacklisted_maps = settings.get("blacklisted_maps", [])
+    source_filter = [state.source] if state.source else None
+    maps = db.get_unique_maps(excluded_maps=blacklisted_maps, allowed_sources=source_filter)
+
+    if not maps:
+        msg = t("general.error", lang, error="No maps available")
+        if edit:
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=msg, color=discord.Color.red()),
+                view=None,
+            )
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return
+
+    options = [discord.SelectOption(label=m, value=m) for m in maps[:25]]
     view = MapSelectView(options, lang)
+    desc = t("suggest.select_map", lang)
+    if state.source:
+        desc = f"**{t('suggest.source_label', lang)}:** {state.source}\n{desc}"
     embed = discord.Embed(
         title=t("suggest.phase_title", lang),
-        description=t("suggest.select_map", lang),
+        description=desc,
         color=discord.Color.green(),
     )
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    if edit:
+        await interaction.response.edit_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class SourceSelectView(ui.View):
+    def __init__(self, options: list[discord.SelectOption], lang: str):
+        super().__init__(timeout=120)
+        self.add_item(SourceSelect(options, lang))
+
+
+class SourceSelect(ui.Select):
+    def __init__(self, options: list[discord.SelectOption], lang: str):
+        super().__init__(placeholder=t("suggest.select_source", lang),
+                         options=options, min_values=1, max_values=1)
+        self.lang = lang
+
+    async def callback(self, interaction: discord.Interaction):
+        state = _suggest_sessions.get(interaction.user.id)
+        if not state:
+            await interaction.response.send_message(t("general.timeout", self.lang), ephemeral=True)
+            return
+
+        state.source = self.values[0]
+        settings = db.get_guild_settings(state.guild_id)
+        lang = settings.get("language", "en") if settings else "en"
+        await _suggest_show_map_step(interaction, state, settings or {}, lang, edit=True)
 
 
 class MapSelectView(ui.View):
@@ -625,12 +717,14 @@ class MapSelect(ui.Select):
         state.map_name = self.values[0]
         settings = db.get_guild_settings(state.guild_id)
         lang = settings.get("language", "en") if settings else "en"
+        source_filter = [state.source] if state.source else None
 
-        # Get available modes for this map
+        # Get available modes for this map (within the chosen source, if any)
         modes = db.get_modes_for_map(
             state.map_name,
             allowed_gamemodes=settings.get("allowed_gamemodes", []),
             blacklisted_gamemodes=settings.get("blacklisted_gamemodes", []),
+            allowed_sources=source_filter,
         )
 
         if not modes:
@@ -677,7 +771,8 @@ class ModeSelect(ui.Select):
             return
 
         raw_name = self.values[0]
-        layer_data = db.get_layer_by_raw_name(raw_name)
+        source_filter = [state.source] if state.source else None
+        layer_data = db.get_layer_by_raw_name(raw_name, allowed_sources=source_filter)
         if not layer_data:
             await interaction.response.edit_message(
                 embed=discord.Embed(description="Layer not found.", color=discord.Color.red()),
@@ -1012,6 +1107,7 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
             "team1_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team1_faction, 1),
             "team2_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team2_faction, 2),
             "raw_name": state.mode_raw_name,
+            "source": state.source,
             "suggested_at": datetime.now().isoformat(),
         }
 
@@ -1962,6 +2058,64 @@ class GamemodeSelect(ui.Select):
         )
 
 
+@bot.tree.command(name="config_layer_sources",
+                  description="Configure which layer sources are offered when creating events")
+async def cmd_config_layer_sources(interaction: discord.Interaction):
+    settings = await check_guild_configured(interaction)
+    if not settings:
+        return
+    if not await check_organizer(interaction, settings):
+        return
+
+    lang = settings.get("language", "en")
+    all_sources = db.get_unique_sources()
+    if not all_sources:
+        await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
+        return
+
+    # An empty stored value means "all sources allowed" — pre-select everything
+    # so the admin sees the effective state.
+    current = settings.get("allowed_sources", []) or all_sources
+    options = [
+        discord.SelectOption(label=s, value=s, default=(s in current))
+        for s in all_sources[:25]
+    ]
+    view = SourceConfigView(options, lang)
+    await interaction.response.send_message(
+        t("config.sources_prompt", lang, count=len(all_sources)),
+        view=view, ephemeral=True,
+    )
+
+
+class SourceConfigView(ui.View):
+    def __init__(self, options: list[discord.SelectOption], lang: str):
+        super().__init__(timeout=120)
+        self.lang = lang
+        self.add_item(SourceConfigSelect(options, lang))
+
+
+class SourceConfigSelect(ui.Select):
+    def __init__(self, options: list[discord.SelectOption], lang: str):
+        super().__init__(placeholder=t("config.sources_placeholder", lang),
+                         options=options, min_values=1, max_values=len(options))
+        self.lang = lang
+
+    async def callback(self, interaction: discord.Interaction):
+        settings = db.get_guild_settings(interaction.guild_id)
+        if not settings:
+            return
+        settings["allowed_sources"] = list(self.values)
+        db.save_guild_settings(interaction.guild_id, settings)
+        await interaction.response.edit_message(
+            content=t("config.sources_updated", self.lang, sources=", ".join(self.values)),
+            view=None,
+        )
+        await send_to_log_channel(
+            f"Allowed layer sources updated: {', '.join(self.values)}",
+            guild_id=interaction.guild_id,
+        )
+
+
 @bot.tree.command(name="config_blacklist", description="Manage blacklist (maps, factions, units)")
 @app_commands.describe(blacklist_type="What to blacklist")
 @app_commands.choices(blacklist_type=[
@@ -2247,13 +2401,69 @@ async def cmd_create_event(interaction: discord.Interaction,
             )
             return
 
+    # Resolve which sources should be allowed for this event:
+    #   - Take all sources currently in the cache as the universe of options.
+    #   - Intersect with the guild's `allowed_sources` default, if set.
+    cache_sources = db.get_unique_sources()
+    guild_default = settings.get("allowed_sources") or []
+    if guild_default:
+        offered = [s for s in cache_sources if s in guild_default]
+    else:
+        offered = list(cache_sources)
+
+    if not offered:
+        await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
+        return
+
+    # If only one source is available, skip the picker entirely.
+    if len(offered) == 1:
+        await _finalize_event_creation(
+            interaction, settings, lang,
+            allowed_sources=offered,
+            sst=sst,
+            suggestion_duration_seconds=suggestion_duration_seconds,
+            voting_duration_hours=voting_duration_hours,
+            allow_multiple_votes=allow_multiple_votes,
+            ack_via_followup=False,
+        )
+        return
+
+    # Multiple sources → ask the admin which to expose to users.
+    options = [
+        discord.SelectOption(label=s, value=s, default=True)
+        for s in offered[:25]
+    ]
+    view = EventSourceSelectView(
+        options=options,
+        lang=lang,
+        sst=sst,
+        suggestion_duration_seconds=suggestion_duration_seconds,
+        voting_duration_hours=voting_duration_hours,
+        allow_multiple_votes=allow_multiple_votes,
+    )
+    embed = discord.Embed(
+        title=t("event.select_sources_title", lang),
+        description=t("event.select_sources_desc", lang),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+async def _finalize_event_creation(interaction: discord.Interaction, settings: dict, lang: str,
+                                   *, allowed_sources: list[str],
+                                   sst, suggestion_duration_seconds,
+                                   voting_duration_hours, allow_multiple_votes,
+                                   ack_via_followup: bool):
+    """Create the event row and post its embed. Used by both the no-picker path
+    (single source) and the EventSourceSelectView confirm callback."""
     event_data = db.build_default_event(suggestion_start_time=sst)
     event_data["voting_duration_hours"] = max(1, min(MAX_VOTING_DURATION_HOURS, voting_duration_hours))
     event_data["suggestion_duration_seconds"] = suggestion_duration_seconds
     event_data["allow_multiple_votes"] = bool(allow_multiple_votes)
+    event_data["allowed_sources"] = list(allowed_sources)
 
     # Create event in DB first
-    db_id = db.create_event(interaction.guild_id, interaction.channel_id, event_data)
+    db.create_event(interaction.guild_id, interaction.channel_id, event_data)
 
     # Post the event embed
     embed = build_event_embed(event_data, settings)
@@ -2269,11 +2479,67 @@ async def cmd_create_event(interaction: discord.Interaction,
             event["event_message_id"] = msg.id
             db.save_event(record["db_id"], event)
 
-    await interaction.response.send_message(f"✅ {t('event.created', lang)}", ephemeral=True)
+    ack_text = f"✅ {t('event.created', lang)}"
+    if ack_via_followup:
+        await interaction.response.edit_message(content=ack_text, embed=None, view=None)
+    else:
+        await interaction.response.send_message(ack_text, ephemeral=True)
     await send_to_log_channel(
-        f"Event created in <#{interaction.channel_id}> by {interaction.user.display_name}",
+        f"Event created in <#{interaction.channel_id}> by {interaction.user.display_name} "
+        f"(sources: {', '.join(allowed_sources)})",
         guild_id=interaction.guild_id,
     )
+
+
+class EventSourceSelectView(ui.View):
+    """Per-event source picker shown when /create_layer_suggestion is run with
+    more than one source available. Confirms with the admin's selection and
+    then proceeds to event creation."""
+
+    def __init__(self, options, lang, sst, suggestion_duration_seconds,
+                 voting_duration_hours, allow_multiple_votes):
+        super().__init__(timeout=180)
+        self.lang = lang
+        self.sst = sst
+        self.suggestion_duration_seconds = suggestion_duration_seconds
+        self.voting_duration_hours = voting_duration_hours
+        self.allow_multiple_votes = allow_multiple_votes
+        # Discord's Select.values is empty until the user interacts with the
+        # dropdown — even when options have default=True. Capture the defaults
+        # so a no-interaction click on Confirm uses what the admin saw selected.
+        self._default_values = [o.value for o in options if o.default]
+        self.select = ui.Select(
+            placeholder=t("event.select_sources_placeholder", lang),
+            options=options,
+            min_values=1,
+            max_values=len(options),
+        )
+        self.add_item(self.select)
+
+    @ui.button(label="Confirm", style=discord.ButtonStyle.success, row=1)
+    async def confirm(self, interaction: discord.Interaction, button: ui.Button):
+        chosen = list(self.select.values) if self.select.values else list(self._default_values)
+        if not chosen:
+            await interaction.response.send_message(
+                t("event.select_sources_required", self.lang), ephemeral=True)
+            return
+        # Re-check that no event was created in this channel while picker was open.
+        if db.channel_has_active_event(interaction.guild_id, interaction.channel_id):
+            await interaction.response.edit_message(
+                content=t("event.already_exists", self.lang),
+                embed=None, view=None,
+            )
+            return
+        settings = db.get_guild_settings(interaction.guild_id) or {}
+        await _finalize_event_creation(
+            interaction, settings, self.lang,
+            allowed_sources=chosen,
+            sst=self.sst,
+            suggestion_duration_seconds=self.suggestion_duration_seconds,
+            voting_duration_hours=self.voting_duration_hours,
+            allow_multiple_votes=self.allow_multiple_votes,
+            ack_via_followup=True,
+        )
 
 
 @bot.tree.command(name="open_suggestions", description="Manually open the suggestion phase")
@@ -2636,6 +2902,7 @@ async def _handle_history_add_submit(interaction: discord.Interaction,
         "team1_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team1_faction, 1),
         "team2_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team2_faction, 2),
         "raw_name": state.mode_raw_name,
+        "source": state.source,
         "suggested_at": datetime.now().isoformat(),
     }
 
