@@ -118,6 +118,34 @@ def _build_layers_json_sources(urls: list[str]) -> list[tuple[str, str]]:
 LAYERS_JSON_URLS = _parse_layers_json_urls(os.getenv("LAYERS_JSON_URL", ""))
 LAYERS_JSON_SOURCES = _build_layers_json_sources(LAYERS_JSON_URLS)
 
+# ── Layer exclusions — never cache these maps / gamemodes ────────────────
+# mapId substrings: any layer whose mapId contains one of these is excluded.
+EXCLUDED_MAP_ID_SUBSTRINGS: tuple[str, ...] = (
+    "JensensRange",
+    "JesensRange",           # typo variant found in source data
+    "Supermod_JensensRange",
+)
+
+# mapName prefixes: any layer whose resolved mapName starts with one of these is excluded.
+EXCLUDED_MAP_NAME_PREFIXES: tuple[str, ...] = (
+    "Jensen",
+    "Tutorial",
+)
+
+# Exact gamemode values to exclude.
+EXCLUDED_GAMEMODES: frozenset[str] = frozenset({"Training"})
+
+
+def is_excluded_layer(map_id: str, map_name: str, gamemode: str) -> bool:
+    if any(s in map_id for s in EXCLUDED_MAP_ID_SUBSTRINGS):
+        return True
+    if any(map_name.startswith(p) for p in EXCLUDED_MAP_NAME_PREFIXES):
+        return True
+    if gamemode in EXCLUDED_GAMEMODES:
+        return True
+    return False
+
+
 # ── SquadCalc link in embeds ──────────────────────────────────────────────
 SQUADCALC_BASE_URL = os.getenv("SQUADCALC_BASE_URL", "").rstrip("/")
 

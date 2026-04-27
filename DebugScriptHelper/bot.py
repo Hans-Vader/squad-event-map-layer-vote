@@ -21,7 +21,7 @@ from discord import app_commands, ui
 from discord.ext import commands
 
 import database as db
-from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_FAST, EVENT_CRITICAL_WINDOW, LAYERS_JSON_SOURCES, DEBUG_MODE
+from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_FAST, EVENT_CRITICAL_WINDOW, LAYERS_JSON_SOURCES, DEBUG_MODE, is_excluded_layer
 from i18n import t
 from utils import (
     has_organizer_role, is_guild_admin,
@@ -264,15 +264,7 @@ async def _cache_source_layers(source_name: str, layers) -> int:
         if not raw_name or not map_name or not gamemode:
             continue
 
-        # Skip training/testing/tutorial maps entirely — never cache them
-        if (
-            map_id.startswith("JensensRange")
-            or map_name.startswith("Jensen")
-            or "JensensRange" in map_id
-            or "Tutorial" in map_name
-            or gamemode == "Training"
-            or map_id.startswith("JesensRange")
-        ):
+        if is_excluded_layer(map_id, map_name, gamemode):
             continue
 
         # Extract factions with their unit types, default unit, and team availability.
@@ -636,6 +628,37 @@ async def handle_suggest_start(interaction: discord.Interaction):
     await _suggest_show_map_step(interaction, state, settings, lang, edit=False)
 
 
+_MAP_PREFIX_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)\s*\|\s*(.+)$")
+
+
+def _group_maps_by_prefix(maps: list[str]) -> "dict[str, list[str]]":
+    """Group map names by their pipe-prefix.
+
+    'GoingDark | Harju' → group 'GoingDark'; 'SPM | Al Basrah' → group 'SPM';
+    'Yehorivka' (no prefix) → group 'Other'. Insertion order is preserved.
+    """
+    groups: dict[str, list[str]] = {}
+    for m in maps:
+        match = _MAP_PREFIX_RE.match(m)
+        prefix = match.group(1) if match else "Other"
+        groups.setdefault(prefix, []).append(m)
+    return groups
+
+
+def _build_map_picker_view(maps: list[str], lang: str) -> ui.View:
+    """Build the map-select view, splitting into per-prefix dropdowns when the
+    list exceeds Discord's 25-option limit on a single Select.
+
+    With ≤25 maps, returns a single MapSelectView (existing behavior).
+    With >25, returns a GroupedMapSelectView with one Select per prefix group.
+    """
+    if len(maps) <= 25:
+        options = [discord.SelectOption(label=m, value=m) for m in maps]
+        return MapSelectView(options, lang)
+    groups = _group_maps_by_prefix(maps)
+    return GroupedMapSelectView(groups, lang)
+
+
 async def _suggest_show_map_step(interaction: discord.Interaction, state: SuggestState,
                                  settings: dict, lang: str, edit: bool):
     """Render the map-select dropdown. Used after source pick or when only one source exists."""
@@ -654,8 +677,7 @@ async def _suggest_show_map_step(interaction: discord.Interaction, state: Sugges
             await interaction.response.send_message(msg, ephemeral=True)
         return
 
-    options = [discord.SelectOption(label=m, value=m) for m in maps[:25]]
-    view = MapSelectView(options, lang)
+    view = _build_map_picker_view(maps, lang)
     desc = t("suggest.select_map", lang)
     if state.source:
         desc = f"**{t('suggest.source_label', lang)}:** {state.source}\n{desc}"
@@ -702,9 +724,40 @@ class MapSelectView(ui.View):
         self.add_item(select)
 
 
+class GroupedMapSelectView(ui.View):
+    """Map picker with one MapSelect per prefix group. Used when the map list
+    exceeds Discord's 25-option-per-Select cap (typical for the supermod source,
+    which has 45 maps split across `GoingDark | …`, `SPM | …`, and standalone)."""
+
+    def __init__(self, groups: "dict[str, list[str]]", lang: str):
+        super().__init__(timeout=120)
+        self.lang = lang
+        # Discord caps a View at 5 components; one Select per row. With more
+        # than 5 prefix groups, fold the trailing groups into "Other" so the
+        # view still fits.
+        items = list(groups.items())
+        if len(items) > 5:
+            head = items[:4]
+            tail_maps: list[str] = []
+            for _, ms in items[4:]:
+                tail_maps.extend(ms)
+            items = head + [("Other", tail_maps)]
+        for prefix, group_maps in items:
+            if not group_maps:
+                continue
+            if len(group_maps) > 25:
+                logger.warning(
+                    "Map group '%s' has %d maps; truncating to 25 (Discord Select limit).",
+                    prefix, len(group_maps),
+                )
+            options = [discord.SelectOption(label=m, value=m) for m in group_maps[:25]]
+            self.add_item(MapSelect(options, lang, placeholder=f"{prefix} ({len(group_maps)})"))
+
+
 class MapSelect(ui.Select):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
-        super().__init__(placeholder=t("suggest.select_map", lang),
+    def __init__(self, options: list[discord.SelectOption], lang: str,
+                 placeholder: Optional[str] = None):
+        super().__init__(placeholder=placeholder or t("suggest.select_map", lang),
                          options=options, min_values=1, max_values=1)
         self.lang = lang
 
@@ -2946,8 +2999,7 @@ async def cmd_history_add(interaction: discord.Interaction):
             t("general.error", lang, error="No maps available"), ephemeral=True)
         return
 
-    options = [discord.SelectOption(label=m, value=m) for m in maps[:25]]
-    view = MapSelectView(options, lang)
+    view = _build_map_picker_view(maps, lang)
     embed = discord.Embed(
         title=t("history.add_title", lang),
         description=t("suggest.select_map", lang),
