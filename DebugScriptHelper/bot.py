@@ -700,17 +700,17 @@ def _group_maps_by_size(maps: list[str], sizes: "dict[str, float]") -> "dict[str
 
 def _build_map_picker_view(maps: list[str], lang: str,
                            sizes: "dict[str, float]") -> ui.View:
-    """Build the map-select view. With ≤25 maps a single dropdown is used;
-    with more, the maps are split into Small/Medium/Large dropdowns by their
-    canonical (largest-layer) size. Map counts are shown in every placeholder.
+    """Build the map-select view: always split into Small/Medium/Large
+    dropdowns by canonical (largest-layer) size, with map counts in every
+    placeholder. Falls back to a single flat dropdown only when grouping
+    collapses to a single non-empty bucket (e.g. tiny custom sources).
     """
-    if len(maps) <= 25:
+    groups = _group_maps_by_size(maps, sizes)
+    non_empty = [(k, v) for k, v in groups.items() if v]
+    if len(non_empty) <= 1:
         options = [discord.SelectOption(label=m, value=m) for m in maps]
-        # Append count to the localized prompt (strip trailing period so we get
-        # "Select a map (25)" instead of "Select a map. (25)").
         placeholder = f"{t('suggest.select_map', lang).rstrip('.')} ({len(maps)})"
         return MapSelectView(options, lang, placeholder=placeholder)
-    groups = _group_maps_by_size(maps, sizes)
     return GroupedMapSelectView(groups, lang)
 
 
