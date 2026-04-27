@@ -229,10 +229,10 @@ async def fetch_and_cache_layers() -> int:
             )
             continue
 
-        # Build factionID → alliance from the source's Units block — this is the
-        # source of truth and covers SuperMod factions (SU_*) the hardcoded
-        # ALLIANCE_FACTIONS map doesn't know about.
-        faction_alliance = _build_faction_alliance_map(data)
+        # Build factionID → {alliance, factionName} from the source's Units block —
+        # this is the source of truth and covers SuperMod factions (SU_*) the
+        # hardcoded ALLIANCE_FACTIONS map doesn't know about.
+        faction_meta = _build_faction_meta_map(data)
 
         # Within a single source, dedupe by rawName (last wins).
         unique: dict[str, dict] = {}
@@ -243,26 +243,34 @@ async def fetch_and_cache_layers() -> int:
             if raw_name:
                 unique[raw_name] = layer
 
-        count += await _cache_source_layers(source_name, unique.values(), faction_alliance)
+        count += await _cache_source_layers(source_name, unique.values(), faction_meta)
 
     return count
 
 
-def _build_faction_alliance_map(data: object) -> dict[str, str]:
-    """Extract {factionID: alliance} from the source JSON's Units block."""
+def _build_faction_meta_map(data: object) -> dict[str, dict]:
+    """Extract {factionID: {"alliance", "factionName"}} from the source's Units block."""
     if not isinstance(data, dict):
         return {}
     units = data.get("Units")
     if not isinstance(units, dict):
         return {}
-    result: dict[str, str] = {}
+    result: dict[str, dict] = {}
     for unit in units.values():
         if not isinstance(unit, dict):
             continue
         fid = unit.get("factionID")
-        alliance = unit.get("alliance")
-        if fid and alliance and fid not in result:
-            result[fid] = alliance
+        if not fid:
+            continue
+        entry = result.setdefault(fid, {"alliance": "", "factionName": ""})
+        if not entry["alliance"]:
+            alliance = unit.get("alliance") or ""
+            if alliance:
+                entry["alliance"] = alliance
+        if not entry["factionName"]:
+            faction_name = unit.get("factionName") or ""
+            if faction_name:
+                entry["factionName"] = faction_name
     return result
 
 
@@ -291,9 +299,9 @@ def _parse_map_size_km(raw: str) -> Optional[float]:
 
 
 async def _cache_source_layers(source_name: str, layers,
-                               faction_alliance: dict[str, str] = None) -> int:
+                               faction_meta: dict[str, dict] = None) -> int:
     """Parse and upsert each layer for a single source. Returns count cached."""
-    faction_alliance = faction_alliance or {}
+    faction_meta = faction_meta or {}
     count = 0
     for layer in layers:
         raw_name = layer.get("rawName") or layer.get("Name", "")
@@ -345,20 +353,24 @@ async def _cache_source_layers(source_name: str, layers,
                                 "name": ut.get("name", ut_type),
                             })
                 if fac_id:
+                    meta = faction_meta.get(fac_id, {})
                     factions_data.append({
                         "factionId": fac_id,
+                        "factionName": meta.get("factionName", ""),
                         "defaultUnit": default_unit,
                         "availableOnTeams": available_on_teams,
                         "unitTypes": unit_types,
-                        "alliance": faction_alliance.get(fac_id, ""),
+                        "alliance": meta.get("alliance", ""),
                     })
             elif isinstance(fac, str):
+                meta = faction_meta.get(fac, {})
                 factions_data.append({
                     "factionId": fac,
+                    "factionName": meta.get("factionName", ""),
                     "defaultUnit": "",
                     "availableOnTeams": [],
                     "unitTypes": [],
-                    "alliance": faction_alliance.get(fac, ""),
+                    "alliance": meta.get("alliance", ""),
                 })
 
         # Extract team alliance restrictions
@@ -448,8 +460,10 @@ def get_factions_for_team(layer_data: dict, team: int,
         seen_ids.add(fac_id)
         unit_types = []
         default_unit = ""
+        faction_name = ""
         if isinstance(fac, dict):
             default_unit = fac.get("defaultUnit", "") or ""
+            faction_name = fac.get("factionName", "") or ""
             for ut in fac.get("unitTypes", fac.get("types", [])):
                 ut_type = ut.get("type", "") if isinstance(ut, dict) else ut
                 if blacklisted_units and ut_type in blacklisted_units:
@@ -459,6 +473,7 @@ def get_factions_for_team(layer_data: dict, team: int,
 
         result.append({
             "factionId": fac_id,
+            "factionName": faction_name,
             "defaultUnit": default_unit,
             "unitTypes": unit_types,
         })
@@ -520,6 +535,19 @@ def _resolve_unit_prefix(layer_data: dict, faction_id: str, team: int) -> Option
     if not entry:
         return None
     return extract_unit_prefix(entry.get("defaultUnit", ""), faction_id)
+
+
+def _resolve_faction_name(layer_data: dict, faction_id: str, team: int) -> str:
+    """Look up the human-readable factionName for a faction on a team.
+
+    Falls back to "" when the layer data has no entry for that faction.
+    """
+    if not layer_data or not faction_id:
+        return ""
+    entry = get_faction_entry_for_team(layer_data.get("factions", []), faction_id, team)
+    if not entry:
+        return ""
+    return entry.get("factionName", "") or ""
 
 
 def extract_unit_prefix(default_unit: str, faction_id: str) -> Optional[str]:
@@ -941,7 +969,11 @@ class ModeSelect(ui.Select):
             return
 
         options = [
-            discord.SelectOption(label=f["factionId"], value=f["factionId"])
+            discord.SelectOption(
+                label=f["factionId"],
+                value=f["factionId"],
+                description=(f.get("factionName") or "")[:100] or None,
+            )
             for f in factions[:25]
         ]
 
@@ -1054,7 +1086,11 @@ async def _show_team2_faction_select(interaction: discord.Interaction,
         return
 
     options = [
-        discord.SelectOption(label=f["factionId"], value=f["factionId"])
+        discord.SelectOption(
+            label=f["factionId"],
+            value=f["factionId"],
+            description=(f.get("factionName") or "")[:100] or None,
+        )
         for f in factions[:25]
     ]
 
@@ -1242,8 +1278,10 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
             "gamemode": state.gamemode,
             "layer_version": state.layer_version,
             "team1_faction": state.team1_faction,
+            "team1_faction_name": _resolve_faction_name(state.layer_data, state.team1_faction, 1),
             "team1_unit": state.team1_unit,
             "team2_faction": state.team2_faction,
+            "team2_faction_name": _resolve_faction_name(state.layer_data, state.team2_faction, 2),
             "team2_unit": state.team2_unit,
             "team1_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team1_faction, 1),
             "team2_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team2_faction, 2),
@@ -3037,8 +3075,10 @@ async def _handle_history_add_submit(interaction: discord.Interaction,
         "gamemode": state.gamemode,
         "layer_version": state.layer_version,
         "team1_faction": state.team1_faction,
+        "team1_faction_name": _resolve_faction_name(state.layer_data, state.team1_faction, 1),
         "team1_unit": state.team1_unit,
         "team2_faction": state.team2_faction,
+        "team2_faction_name": _resolve_faction_name(state.layer_data, state.team2_faction, 2),
         "team2_unit": state.team2_unit,
         "team1_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team1_faction, 1),
         "team2_unit_prefix": _resolve_unit_prefix(state.layer_data, state.team2_faction, 2),

@@ -14,9 +14,15 @@ import discord
 from discord import Embed
 
 from i18n import t
-from config import ADMIN_IDS, SQUADCALC_BASE_URL
+from config import ADMIN_IDS, LAYERS_JSON_SOURCES, SQUADCALC_BASE_URL
 
 logger = logging.getLogger("layer_vote")
+
+# Layer source whose factionIds and map names map cleanly to SquadCalc params.
+# Layers from any other source still get a clickable map icon, but the URL
+# points at SquadCalc's homepage (since the params would 404) and the
+# layer-specific info is surfaced via a hover tooltip on the link instead.
+SQUADCALC_COMPATIBLE_SOURCE = "main"
 
 # ---------------------------------------------------------------------------
 # Log channel — set per guild at runtime
@@ -118,8 +124,17 @@ def format_layer_short(suggestion: dict) -> str:
 
 
 def build_squadcalc_url(suggestion: dict) -> Optional[str]:
-    """Build a SquadCalc URL for the given suggestion, or None if disabled."""
+    """Build a SquadCalc URL for the given suggestion, or None if disabled.
+
+    Only returns a parameterized URL for layers from the SquadCalc-compatible
+    source ("main"); SPM/SU layers don't round-trip into SquadCalc params, so
+    callers should handle non-main sources via build_map_icon_markdown.
+    """
     if not SQUADCALC_BASE_URL:
+        return None
+
+    source = suggestion.get("source") or ""
+    if source and source != SQUADCALC_COMPATIBLE_SOURCE:
         return None
 
     map_name = suggestion.get("map_name", "")
@@ -155,6 +170,42 @@ def build_squadcalc_url(suggestion: dict) -> Optional[str]:
     return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
 
 
+def _build_supermod_tooltip(suggestion: dict) -> str:
+    """One-line tooltip text for non-main-source layers: map + mode + factionNames."""
+    map_name = suggestion.get("map_name", "?")
+    gamemode = suggestion.get("gamemode", "?")
+    version = suggestion.get("layer_version", "")
+    mode_str = f"{gamemode} {version}".strip() if version else gamemode
+
+    t1_name = suggestion.get("team1_faction_name") or suggestion.get("team1_faction") or "?"
+    t2_name = suggestion.get("team2_faction_name") or suggestion.get("team2_faction") or "?"
+
+    text = f"{map_name} {mode_str} — {t1_name} vs {t2_name}"
+    # Markdown link titles are quoted with `"`; replace any embedded quotes so
+    # the link doesn't break (e.g. SU_IRGC's name contains "Saberin Unit").
+    return text.replace('"', "'")
+
+
+def build_map_icon_markdown(suggestion: dict) -> str:
+    """Render the 🗺️ map icon as a Discord link, with source-aware behaviour.
+
+    - Main-source layers: link to the parameterized SquadCalc URL.
+    - Other sources: link to SquadCalc's homepage with a tooltip that spells
+      out the map + version + full faction names (since the parameter URL
+      would 404 for SPM/SU layers).
+    - SquadCalc disabled (no base URL): plain emoji, no link.
+    """
+    if not SQUADCALC_BASE_URL:
+        return "🗺️"
+
+    url = build_squadcalc_url(suggestion)
+    if url:
+        return f"[🗺️]({url})"
+
+    tooltip = _build_supermod_tooltip(suggestion)
+    return f'[🗺️]({SQUADCALC_BASE_URL}/ "{tooltip}")'
+
+
 def format_suggestion_entry(index: int, suggestion: dict) -> str:
     """Format a suggestion as a single-line embed entry.
 
@@ -174,8 +225,7 @@ def format_suggestion_entry(index: int, suggestion: dict) -> str:
 
     mode_str = f"{gm_short} {version}".strip() if version else gm_short
 
-    url = build_squadcalc_url(suggestion)
-    map_icon = f"[🗺️]({url})" if url else "🗺️"
+    map_icon = build_map_icon_markdown(suggestion)
 
     return (
         f"{map_icon} **{index}. {map_name}**: {mode_str} "
@@ -226,6 +276,32 @@ def suggestion_matches(s1: dict, s2: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Embed builders
 # ---------------------------------------------------------------------------
+
+_SUPERMOD_SOURCE = "supermod"
+
+
+def _event_uses_supermod(event: dict, settings: dict) -> bool:
+    """Whether the supermod layer source is among this event's active sources.
+
+    Mirrors the precedence used by bot._resolve_event_sources without needing
+    a database lookup: explicit event sources first, then the guild cap, then
+    the full configured source list as a legacy fallback.
+    """
+    explicit = event.get("allowed_sources") or []
+    guild_allowed = settings.get("allowed_sources") or []
+
+    if explicit:
+        candidate = list(explicit)
+    elif guild_allowed:
+        candidate = list(guild_allowed)
+    else:
+        candidate = [name for name, _ in LAYERS_JSON_SOURCES]
+
+    if explicit and guild_allowed:
+        candidate = [s for s in candidate if s in guild_allowed]
+
+    return _SUPERMOD_SOURCE in candidate
+
 
 def _embed_total_chars(embed: Embed) -> int:
     """Return total character count of an embed (Discord limit: 6000)."""
@@ -361,15 +437,18 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
             map_name = winner.get("map_name", "?")
             gamemode = winner.get("gamemode", "?")
             version = winner.get("layer_version", "")
-            t1 = winner.get("team1_faction", "?")
+            t1_id = winner.get("team1_faction", "?")
+            t2_id = winner.get("team2_faction", "?")
+            # Prefer the human-readable factionName captured at submit time;
+            # fall back to the factionId for legacy history rows.
+            t1 = winner.get("team1_faction_name") or t1_id
+            t2 = winner.get("team2_faction_name") or t2_id
             t1u = winner.get("team1_unit", "?")
-            t2 = winner.get("team2_faction", "?")
             t2u = winner.get("team2_unit", "?")
 
             mode_str = f"{gamemode} {version}".strip() if version else gamemode
 
-            url = build_squadcalc_url(winner)
-            map_icon = f"[🗺️]({url})" if url else "🗺️"
+            map_icon = build_map_icon_markdown(winner)
 
             winner_text = (
                 f"{map_icon} **{map_name}** — {mode_str}\n"
@@ -384,12 +463,21 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
 
     # Footer (SquadCalc hint) only makes sense when clickable map icons are
     # actually visible: during/after suggestions, or on a completed winner.
-    show_footer = (
+    # The supermod legend is appended whenever the supermod source is active
+    # for this event, so users can decode the SPM/SU and GoingDark prefixes.
+    show_squadcalc_hint = (
         phase in ("suggestions_open", "suggestions_closed", "voting")
         and event.get("suggestions")
     ) or (phase == "completed" and event.get("winning_layer"))
-    if show_footer:
-        embed.set_footer(text=t("embed.footer", lang))
+
+    footer_parts: list[str] = []
+    if show_squadcalc_hint:
+        footer_parts.append(t("embed.footer", lang))
+    if _event_uses_supermod(event, settings):
+        footer_parts.append(t("embed.footer_legend_supermod", lang))
+
+    if footer_parts:
+        embed.set_footer(text="\n".join(footer_parts))
     return embed
 
 
