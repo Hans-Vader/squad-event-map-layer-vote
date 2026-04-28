@@ -131,9 +131,23 @@ intents.members = True
 
 class LayerVoteBot(commands.Bot):
     async def setup_hook(self):
-        self.add_view(EventActionView())
+        # Each active event owns its own message-bound view whose buttons carry
+        # the event's db_id. Re-bind one view per active event on startup so
+        # button clicks survive bot restarts.
+        try:
+            for record in db.get_all_active_events_global():
+                msg_id = record["event"].get("event_message_id")
+                if not msg_id:
+                    continue
+                lang = db.get_guild_language(record["guild_id"])
+                self.add_view(
+                    EventActionView(record["db_id"], lang),
+                    message_id=msg_id,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to re-attach event views on startup: {e}")
         await self.tree.sync()
-        logger.info("Slash commands synced and persistent views registered.")
+        logger.info("Slash commands synced and event views re-attached.")
 
 
 bot = LayerVoteBot(command_prefix="!", intents=intents)
@@ -169,6 +183,23 @@ async def check_organizer(interaction: discord.Interaction, settings: dict) -> b
         await interaction.response.send_message(t("general.requires_organizer", lang), ephemeral=True)
         return False
     return True
+
+
+async def _resolve_channel_event(interaction: discord.Interaction,
+                                 lang: str) -> Optional[int]:
+    """For slash commands acting on "the event in this channel": return the
+    db_id when exactly one active event lives here. Replies with an error and
+    returns None when there are zero (or multiple) — multi-event channels
+    must be addressed via the embed buttons, which carry db_id explicitly.
+    """
+    events = db.get_active_events_in_channel(interaction.guild_id, interaction.channel_id)
+    if not events:
+        await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
+        return None
+    if len(events) > 1:
+        await interaction.response.send_message(t("event.multiple_in_channel", lang), ephemeral=True)
+        return None
+    return events[0]["db_id"]
 
 
 async def check_admin(interaction: discord.Interaction) -> bool:
@@ -603,28 +634,53 @@ def _extract_default_unit_type(default_unit: str, faction_id: str) -> Optional[s
 # ═══════════════════════════════════════════════════════════════════════════
 
 class EventActionView(ui.View):
-    """Persistent view attached to the event embed. Buttons: Suggest, Info, Admin."""
+    """View attached to a specific event's embed. Buttons: Suggest, Info, Admin.
 
-    def __init__(self, lang: str = "en"):
+    Each instance is bound to a single event via db_id, so multiple events
+    can coexist in the same channel without their buttons colliding. Views
+    are re-attached on bot startup (see LayerVoteBot.setup_hook) by walking
+    all active events and binding each view to its event_message_id.
+    """
+
+    def __init__(self, db_id: int, lang: str = "en"):
         super().__init__(timeout=None)
-        self.suggest_button.label = t("button.suggest", lang)
-        self.info_button.label = t("button.info", lang)
-        self.admin_button.label = t("button.admin", lang)
+        self.db_id = db_id
 
-    @ui.button(label="Suggest Layer", style=discord.ButtonStyle.primary,
-               custom_id="event_action:suggest", emoji="🗺️")
-    async def suggest_button(self, interaction: discord.Interaction, button: ui.Button):
-        await handle_suggest_start(interaction)
+        suggest = ui.Button(
+            label=t("button.suggest", lang),
+            style=discord.ButtonStyle.primary,
+            custom_id=f"event_action:suggest:{db_id}",
+            emoji="🗺️",
+        )
+        suggest.callback = self._suggest
+        self.add_item(suggest)
 
-    @ui.button(label="Info", style=discord.ButtonStyle.secondary,
-               custom_id="event_action:info", emoji="ℹ️")
-    async def info_button(self, interaction: discord.Interaction, button: ui.Button):
-        await handle_info(interaction)
+        info = ui.Button(
+            label=t("button.info", lang),
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"event_action:info:{db_id}",
+            emoji="ℹ️",
+        )
+        info.callback = self._info
+        self.add_item(info)
 
-    @ui.button(label="Admin", style=discord.ButtonStyle.danger,
-               custom_id="event_action:admin", emoji="⚙️")
-    async def admin_button(self, interaction: discord.Interaction, button: ui.Button):
-        await handle_admin_panel(interaction)
+        admin = ui.Button(
+            label=t("button.admin", lang),
+            style=discord.ButtonStyle.danger,
+            custom_id=f"event_action:admin:{db_id}",
+            emoji="⚙️",
+        )
+        admin.callback = self._admin
+        self.add_item(admin)
+
+    async def _suggest(self, interaction: discord.Interaction):
+        await handle_suggest_start(interaction, self.db_id)
+
+    async def _info(self, interaction: discord.Interaction):
+        await handle_info(interaction, self.db_id)
+
+    async def _admin(self, interaction: discord.Interaction):
+        await handle_admin_panel(interaction, self.db_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -633,13 +689,18 @@ class EventActionView(ui.View):
 
 class SuggestState:
     """Tracks the state of a suggestion flow for a user."""
-    __slots__ = ("guild_id", "channel_id", "source", "map_name", "mode_raw_name",
-                 "gamemode", "layer_version", "team1_faction", "team1_unit",
-                 "team2_faction", "team2_unit", "layer_data", "flow")
+    __slots__ = ("guild_id", "channel_id", "db_id", "source", "map_name",
+                 "mode_raw_name", "gamemode", "layer_version",
+                 "team1_faction", "team1_unit", "team2_faction", "team2_unit",
+                 "layer_data", "flow")
 
-    def __init__(self, guild_id: int, channel_id: int, flow: str = "suggest"):
+    def __init__(self, guild_id: int, channel_id: int, flow: str = "suggest",
+                 db_id: int = 0):
         self.guild_id = guild_id
         self.channel_id = channel_id
+        # db_id of the event this suggestion targets. 0 for the history_add
+        # flow, which doesn't bind to an event.
+        self.db_id = db_id
         # The layer source the user is suggesting from (e.g. "main", "supermod").
         # Empty string acts as "no source filter" — used for legacy events that
         # predate per-source caching.
@@ -660,6 +721,36 @@ class SuggestState:
 
 # Active suggestion sessions: user_id -> SuggestState
 _suggest_sessions: dict[int, SuggestState] = {}
+
+
+def _event_settings(event: dict, settings: dict) -> dict:
+    """Merge per-event config with guild settings.
+
+    Per-event keys (see db.EVENT_CONFIG_KEYS) win over guild values, so admins
+    editing an event via the DM dialog only affect that event. Falls back to
+    guild settings for any key the event doesn't carry (legacy events that
+    predate Phase 2, or settings outside the snapshot list like language and
+    organizer_role_id).
+    """
+    merged = dict(settings or {})
+    cfg = (event or {}).get("config") or {}
+    for key, value in cfg.items():
+        merged[key] = value
+    return merged
+
+
+def _state_event_settings(state: "SuggestState") -> dict:
+    """Per-suggest-flow settings: merged event config + guild fallbacks.
+
+    SuggestState's mid-flow callbacks don't keep the event in scope, so each
+    one re-merges from a fresh DB read. This keeps suggest filters in sync
+    with concurrent DM edits to the event's config and avoids stale snapshots.
+    """
+    settings = db.get_guild_settings(state.guild_id) or {}
+    if not state.db_id:
+        return settings
+    record = db.get_event_by_db_id(state.guild_id, state.db_id)
+    return _event_settings(record["event"] if record else {}, settings)
 
 
 def _resolve_event_sources(event: dict, settings: dict) -> list[str]:
@@ -684,8 +775,10 @@ def _resolve_event_sources(event: dict, settings: dict) -> list[str]:
     return candidate
 
 
-async def handle_suggest_start(interaction: discord.Interaction):
-    """Start the suggestion flow when user clicks the Suggest button."""
+async def handle_suggest_start(interaction: discord.Interaction, db_id: int):
+    """Start the suggestion flow when user clicks the Suggest button on a
+    specific event's embed. The button carries db_id so the right event is
+    targeted even when multiple events live in the channel."""
     settings = db.get_guild_settings(interaction.guild_id)
     if not settings:
         await interaction.response.send_message(
@@ -694,8 +787,7 @@ async def handle_suggest_start(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
-    # Check event exists and is in suggestion phase
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return
@@ -705,8 +797,10 @@ async def handle_suggest_start(interaction: discord.Interaction):
         await interaction.response.send_message(t("suggest.not_open", lang), ephemeral=True)
         return
 
-    # Check max suggestions
-    max_suggestions = settings.get("max_suggestions_per_user", 2)
+    # Check max suggestions — read from per-event config first, falling back
+    # to guild defaults for legacy events created before Phase 2.
+    event_settings = _event_settings(event, settings)
+    max_suggestions = event_settings.get("max_suggestions_per_user", 2)
     user_suggestions = [s for s in event.get("suggestions", [])
                         if str(s.get("user_id")) == str(interaction.user.id)]
     if len(user_suggestions) >= max_suggestions:
@@ -720,7 +814,7 @@ async def handle_suggest_start(interaction: discord.Interaction):
         return
 
     # Start suggestion flow
-    state = SuggestState(interaction.guild_id, interaction.channel_id)
+    state = SuggestState(interaction.guild_id, interaction.channel_id, db_id=db_id)
     _suggest_sessions[interaction.user.id] = state
 
     sources = _resolve_event_sources(event, settings)
@@ -795,7 +889,8 @@ def _build_map_picker_view(maps: list[str], lang: str,
 async def _suggest_show_map_step(interaction: discord.Interaction, state: SuggestState,
                                  settings: dict, lang: str, edit: bool):
     """Render the map-select dropdown. Used after source pick or when only one source exists."""
-    blacklisted_maps = settings.get("blacklisted_maps", [])
+    event_settings = _state_event_settings(state) if state.db_id else (settings or {})
+    blacklisted_maps = event_settings.get("blacklisted_maps", [])
     source_filter = [state.source] if state.source else None
     maps = db.get_unique_maps(excluded_maps=blacklisted_maps, allowed_sources=source_filter)
 
@@ -900,13 +995,14 @@ class MapSelect(ui.Select):
         state.map_name = self.values[0]
         settings = db.get_guild_settings(state.guild_id)
         lang = settings.get("language", "en") if settings else "en"
+        event_settings = _state_event_settings(state) if state.db_id else (settings or {})
         source_filter = [state.source] if state.source else None
 
         # Get available modes for this map (within the chosen source, if any)
         modes = db.get_modes_for_map(
             state.map_name,
-            allowed_gamemodes=settings.get("allowed_gamemodes", []),
-            blacklisted_gamemodes=settings.get("blacklisted_gamemodes", []),
+            allowed_gamemodes=event_settings.get("allowed_gamemodes", []),
+            blacklisted_gamemodes=event_settings.get("blacklisted_gamemodes", []),
             allowed_sources=source_filter,
         )
 
@@ -970,8 +1066,9 @@ class ModeSelect(ui.Select):
 
         settings = db.get_guild_settings(state.guild_id)
         lang = settings.get("language", "en") if settings else "en"
-        bl_factions = settings.get("blacklisted_factions", []) if settings else []
-        bl_units = settings.get("blacklisted_units", []) if settings else []
+        event_settings = _state_event_settings(state) if state.db_id else (settings or {})
+        bl_factions = event_settings.get("blacklisted_factions", [])
+        bl_units = event_settings.get("blacklisted_units", [])
 
         # Get factions for team 1
         factions = get_factions_for_team(layer_data, 1, bl_factions, bl_units)
@@ -1019,7 +1116,8 @@ class Team1FactionSelect(ui.Select):
         state.team1_faction = self.values[0]
         settings = db.get_guild_settings(state.guild_id)
         lang = settings.get("language", "en") if settings else "en"
-        bl_units = settings.get("blacklisted_units", []) if settings else []
+        event_settings = _state_event_settings(state) if state.db_id else (settings or {})
+        bl_units = event_settings.get("blacklisted_units", [])
 
         # Get unit types for team 1 faction
         units = get_unit_types_for_faction(
@@ -1078,8 +1176,9 @@ async def _show_team2_faction_select(interaction: discord.Interaction,
                                      state: SuggestState, settings: dict):
     """Show team 2 faction dropdown."""
     lang = settings.get("language", "en") if settings else "en"
-    bl_factions = settings.get("blacklisted_factions", []) if settings else []
-    bl_units = settings.get("blacklisted_units", []) if settings else []
+    event_settings = _state_event_settings(state) if state.db_id else (settings or {})
+    bl_factions = event_settings.get("blacklisted_factions", [])
+    bl_units = event_settings.get("blacklisted_units", [])
 
     factions = get_factions_for_team(
         state.layer_data, 2, bl_factions, bl_units,
@@ -1130,7 +1229,8 @@ class Team2FactionSelect(ui.Select):
         state.team2_faction = self.values[0]
         settings = db.get_guild_settings(state.guild_id)
         lang = settings.get("language", "en") if settings else "en"
-        bl_units = settings.get("blacklisted_units", []) if settings else []
+        event_settings = _state_event_settings(state) if state.db_id else (settings or {})
+        bl_units = event_settings.get("blacklisted_units", [])
 
         # Get unit types for team 2 faction
         units = get_unit_types_for_faction(
@@ -1238,7 +1338,7 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
 
     lock = _get_guild_lock(state.guild_id)
     async with lock:
-        record = db.get_event_by_channel(state.guild_id, state.channel_id)
+        record = db.get_event_by_db_id(state.guild_id, state.db_id)
         if not record:
             await interaction.response.edit_message(
                 embed=discord.Embed(description=t("event.no_event", lang), color=discord.Color.red()),
@@ -1249,6 +1349,7 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
         event = record["event"]
         settings = db.get_guild_settings(state.guild_id)
         lang = settings.get("language", "en") if settings else lang
+        event_settings = _event_settings(event, settings or {})
 
         if event.get("phase") != "suggestions_open":
             await interaction.response.edit_message(
@@ -1258,7 +1359,7 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
             return
 
         # Check total suggestion limit (hard cap 25 due to Discord select menu limit)
-        max_total = min(settings.get("max_total_suggestions", 25), 25)
+        max_total = min(event_settings.get("max_total_suggestions", 25), 25)
         if len(event.get("suggestions", [])) >= max_total:
             await interaction.response.edit_message(
                 embed=discord.Embed(
@@ -1300,7 +1401,7 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
                 return
 
         # Check history blocking
-        lookback = settings.get("history_lookback_events", 3) if settings else 3
+        lookback = event_settings.get("history_lookback_events", 3)
         if lookback > 0:
             blocked = db.get_blocked_suggestions(state.guild_id, state.channel_id, lookback)
             for bl in blocked:
@@ -1328,7 +1429,7 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
     )
 
     # Update the main event embed
-    await _update_event_embed(state.guild_id, state.channel_id)
+    await _update_event_embed(state.db_id)
 
     await send_to_log_channel(
         f"New suggestion by {interaction.user.display_name}: {format_layer_short(suggestion)}",
@@ -1340,12 +1441,12 @@ async def handle_suggest_submit(interaction: discord.Interaction, lang: str):
 # INFO BUTTON handler
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def handle_info(interaction: discord.Interaction):
+async def handle_info(interaction: discord.Interaction, db_id: int):
     """Show info about the user's suggestions in this event."""
     settings = db.get_guild_settings(interaction.guild_id)
     lang = settings.get("language", "en") if settings else "en"
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return
@@ -1354,7 +1455,8 @@ async def handle_info(interaction: discord.Interaction):
     user_suggestions = [s for s in event.get("suggestions", [])
                         if str(s.get("user_id")) == str(interaction.user.id)]
 
-    max_suggestions = settings.get("max_suggestions_per_user", 2) if settings else 2
+    event_settings = _event_settings(event, settings or {})
+    max_suggestions = event_settings.get("max_suggestions_per_user", 2)
     embed = discord.Embed(
         title=t("button.info", lang),
         color=discord.Color.blurple(),
@@ -1377,8 +1479,8 @@ async def handle_info(interaction: discord.Interaction):
 # ADMIN PANEL
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def handle_admin_panel(interaction: discord.Interaction):
-    """Show admin action buttons."""
+async def handle_admin_panel(interaction: discord.Interaction, db_id: int):
+    """Show admin action buttons for a specific event."""
     settings = db.get_guild_settings(interaction.guild_id)
     if not settings:
         await interaction.response.send_message(
@@ -1390,7 +1492,7 @@ async def handle_admin_panel(interaction: discord.Interaction):
         await interaction.response.send_message(t("general.requires_organizer", lang), ephemeral=True)
         return
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return
@@ -1431,44 +1533,62 @@ class AdminPanelView(ui.View):
                                       t("admin.remove_suggestion", lang),
                                       discord.ButtonStyle.secondary, "✂️"))
 
+        # Edit opens a DM dialog for changing this event's per-event config
+        # (gamemodes, blacklists, limits, voting params) without touching the
+        # guild defaults. Available at any phase.
+        self.add_item(AdminButton("edit_event", t("admin.edit_event", lang),
+                                  discord.ButtonStyle.primary, "✏️"))
+
         self.add_item(AdminButton("delete_event", t("admin.delete_event", lang), discord.ButtonStyle.danger, "🗑️"))
 
 
 class AdminButton(ui.Button):
     def __init__(self, action: str, label: str, style: discord.ButtonStyle, emoji: str):
+        # Custom_ids are scoped to the action only; the per-event db_id lives
+        # on the view (AdminPanelView), which is non-persistent (panel is
+        # ephemeral, reopens via the Admin button each time).
         super().__init__(label=label, style=style, emoji=emoji, custom_id=f"admin:{action}")
         self.action = action
 
     async def callback(self, interaction: discord.Interaction):
+        db_id = self.view.db_id
         if self.action == "open_suggestions":
             settings = db.get_guild_settings(interaction.guild_id)
             lang = settings.get("language", "en") if settings else "en"
-            await interaction.response.send_modal(OpenSuggestionsModal(lang))
+            await interaction.response.send_modal(OpenSuggestionsModal(lang, db_id))
         elif self.action == "close_suggestions":
-            await admin_close_suggestions(interaction)
+            await admin_close_suggestions(interaction, db_id)
         elif self.action == "select_for_vote":
-            await admin_select_for_vote(interaction)
+            await admin_select_for_vote(interaction, db_id)
         elif self.action == "end_vote":
-            await admin_end_vote(interaction)
+            await admin_end_vote(interaction, db_id)
         elif self.action == "remove_suggestion":
-            await admin_remove_suggestion(interaction)
+            await admin_remove_suggestion(interaction, db_id)
+        elif self.action == "edit_event":
+            await admin_edit_event(interaction, db_id)
         elif self.action == "delete_event":
-            await admin_delete_event(interaction)
+            await admin_delete_event(interaction, db_id)
 
 
 class ConfirmActionView(ui.View):
-    """Generic confirmation dialog with Confirm and Cancel buttons."""
+    """Generic confirmation dialog with Confirm and Cancel buttons.
 
-    def __init__(self, lang: str, confirm_callback):
+    The confirm_callback is invoked with (interaction, db_id) so admin flows
+    can route the action back to the originating event without relying on
+    channel-scoped lookups.
+    """
+
+    def __init__(self, lang: str, confirm_callback, db_id: int = 0):
         super().__init__(timeout=60)
         self.lang = lang
+        self.db_id = db_id
         self._confirm_callback = confirm_callback
         self.confirm_button.label = t("general.confirm", lang)
         self.cancel_button.label = t("general.cancel", lang)
 
     @ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
     async def confirm_button(self, interaction: discord.Interaction, button: ui.Button):
-        await self._confirm_callback(interaction)
+        await self._confirm_callback(interaction, self.db_id)
 
     @ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -1480,16 +1600,13 @@ class ConfirmActionView(ui.View):
         )
 
 
-async def admin_open_suggestions(interaction: discord.Interaction,
+async def admin_open_suggestions(interaction: discord.Interaction, db_id: int,
                                  auto_close_seconds: Optional[int] = None):
-    """Open the suggestion phase. When auto_close_seconds is set, the phase
-    auto-closes (and either starts voting or pings the organizer role for
-    manual selection) when the timer expires. Uses send_message so the flow
-    works both from a button click and from a modal submit."""
+    """Open the suggestion phase for a specific event."""
     lock = _get_guild_lock(interaction.guild_id)
     end_time = None
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if not record:
             return
         event = record["event"]
@@ -1519,16 +1636,17 @@ async def admin_open_suggestions(interaction: discord.Interaction,
         embed=discord.Embed(description=f"✅ {ack_text}", color=discord.Color.green()),
         ephemeral=True,
     )
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+    await _update_event_embed(db_id)
     await send_to_log_channel(ack_text, guild_id=interaction.guild_id)
 
 
 class OpenSuggestionsModal(ui.Modal):
     """Prompts the organizer for an optional suggestion-phase duration."""
 
-    def __init__(self, lang: str):
+    def __init__(self, lang: str, db_id: int):
         super().__init__(title=t("phase.duration_modal_title", lang))
         self.lang = lang
+        self.db_id = db_id
         self.duration_input = ui.TextInput(
             label=t("phase.duration_label", lang),
             placeholder=t("phase.duration_placeholder", lang),
@@ -1546,15 +1664,15 @@ class OpenSuggestionsModal(ui.Modal):
                 ephemeral=True,
             )
             return
-        await admin_open_suggestions(interaction, auto_close_seconds=seconds)
+        await admin_open_suggestions(interaction, self.db_id, auto_close_seconds=seconds)
 
 
-async def admin_close_suggestions(interaction: discord.Interaction):
+async def admin_close_suggestions(interaction: discord.Interaction, db_id: int):
     """Show confirmation before closing the suggestion phase."""
     settings = db.get_guild_settings(interaction.guild_id)
     lang = settings.get("language", "en") if settings else "en"
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         return
     event = record["event"]
@@ -1565,18 +1683,18 @@ async def admin_close_suggestions(interaction: discord.Interaction):
         )
         return
 
-    view = ConfirmActionView(lang, _do_close_suggestions)
+    view = ConfirmActionView(lang, _do_close_suggestions, db_id=db_id)
     await interaction.response.edit_message(
         embed=discord.Embed(description=t("confirm.close_suggestions", lang), color=discord.Color.orange()),
         view=view,
     )
 
 
-async def _do_close_suggestions(interaction: discord.Interaction):
+async def _do_close_suggestions(interaction: discord.Interaction, db_id: int):
     """Actually close the suggestion phase after confirmation."""
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if not record:
             return
         event = record["event"]
@@ -1601,13 +1719,13 @@ async def _do_close_suggestions(interaction: discord.Interaction):
         ),
         view=None,
     )
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+    await _update_event_embed(db_id)
     await send_to_log_channel(f"Suggestion phase closed. {count} suggestions.", guild_id=interaction.guild_id)
 
 
-async def admin_select_for_vote(interaction: discord.Interaction):
+async def admin_select_for_vote(interaction: discord.Interaction, db_id: int):
     """Show layer selection view for admin to pick layers for voting."""
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         return
 
@@ -1683,7 +1801,7 @@ class RandomButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         import random
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, self.view.db_id)
         if not record:
             return
 
@@ -1724,20 +1842,21 @@ class ConfirmVoteButton(ui.Button):
 
         captured_ids = list(selected_ids)
         lang = self.lang
+        db_id = self.view.db_id
 
-        async def _do_start_vote(confirm_interaction: discord.Interaction):
+        async def _do_start_vote(confirm_interaction: discord.Interaction, _db_id: int):
             lock = _get_guild_lock(confirm_interaction.guild_id)
             async with lock:
-                record = db.get_event_by_channel(confirm_interaction.guild_id, confirm_interaction.channel_id)
+                record = db.get_event_by_db_id(confirm_interaction.guild_id, _db_id)
                 if not record:
                     return
                 event = record["event"]
                 event["selected_for_vote"] = captured_ids
                 event["phase"] = "voting"
                 db.save_event(record["db_id"], event)
-            await _start_poll(confirm_interaction, captured_ids)
+            await _start_poll(confirm_interaction, _db_id, captured_ids)
 
-        view = ConfirmActionView(lang, _do_start_vote)
+        view = ConfirmActionView(lang, _do_start_vote, db_id=db_id)
         await interaction.response.edit_message(
             embed=discord.Embed(
                 description=t("confirm.start_vote", lang),
@@ -1746,9 +1865,10 @@ class ConfirmVoteButton(ui.Button):
         )
 
 
-async def _start_poll(interaction: discord.Interaction, selected_ids: list[str]):
+async def _start_poll(interaction: discord.Interaction, db_id: int,
+                      selected_ids: list[str]):
     """Create a Discord native poll for the selected layers."""
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         return
 
@@ -1777,7 +1897,7 @@ async def _start_poll(interaction: discord.Interaction, selected_ids: list[str])
 
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if record:
             event = record["event"]
             event["poll_message_id"] = poll_message.id
@@ -1790,19 +1910,25 @@ async def _start_poll(interaction: discord.Interaction, selected_ids: list[str])
         ),
         view=None,
     )
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+    await _update_event_embed(db_id)
     await send_to_log_channel(
         f"Voting started with {len(selected)} layers for {duration_hours}h",
         guild_id=interaction.guild_id,
     )
 
 
-async def _auto_start_poll(guild_id: int, channel_id: int,
-                           selected_ids: list[str]) -> bool:
+async def _auto_start_poll(db_id: int, selected_ids: list[str]) -> bool:
     """Background variant of _start_poll — creates the poll without an
     interaction. Returns True on success.
 
     Assumes the event phase has already been set to "voting" under lock."""
+    record = db.get_active_event_unsafe(db_id)
+    if not record:
+        return False
+    guild_id = record["guild_id"]
+    channel_id = record["channel_id"]
+    event = record["event"]
+
     guild = bot.get_guild(guild_id)
     if not guild:
         return False
@@ -1810,11 +1936,6 @@ async def _auto_start_poll(guild_id: int, channel_id: int,
     if not channel:
         return False
 
-    record = db.get_event_by_channel(guild_id, channel_id)
-    if not record:
-        return False
-
-    event = record["event"]
     settings = db.get_guild_settings(guild_id)
     lang = settings.get("language", "en") if settings else "en"
     suggestions = event.get("suggestions", [])
@@ -1840,23 +1961,23 @@ async def _auto_start_poll(guild_id: int, channel_id: int,
 
     lock = _get_guild_lock(guild_id)
     async with lock:
-        rec = db.get_event_by_channel(guild_id, channel_id)
+        rec = db.get_active_event_unsafe(db_id)
         if rec:
             rec["event"]["poll_message_id"] = poll_message.id
             db.save_event(rec["db_id"], rec["event"])
 
-    await _update_event_embed(guild_id, channel_id)
+    await _update_event_embed(db_id)
     return True
 
 
-async def admin_end_vote(interaction: discord.Interaction):
+async def admin_end_vote(interaction: discord.Interaction, db_id: int):
     """End the voting phase and determine the winner."""
     settings = db.get_guild_settings(interaction.guild_id)
     lang = settings.get("language", "en") if settings else "en"
 
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if not record:
             return
 
@@ -1893,7 +2014,7 @@ async def admin_end_vote(interaction: discord.Interaction):
         embed=discord.Embed(description=desc, color=discord.Color.gold()),
         view=None,
     )
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+    await _update_event_embed(db_id)
     await send_to_log_channel(
         f"Voting ended. Winner: {format_layer_short(winner) if winner else 'None'}",
         guild_id=interaction.guild_id,
@@ -1947,12 +2068,12 @@ async def _resolve_poll_winner(channel: discord.TextChannel, event: dict) -> Opt
     return None
 
 
-async def admin_delete_event(interaction: discord.Interaction):
-    """Show confirmation before deleting the current event."""
+async def admin_delete_event(interaction: discord.Interaction, db_id: int):
+    """Show confirmation before deleting a specific event."""
     settings = db.get_guild_settings(interaction.guild_id)
     lang = settings.get("language", "en") if settings else "en"
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.edit_message(
             embed=discord.Embed(description=t("event.no_event", lang), color=discord.Color.red()),
@@ -1960,21 +2081,21 @@ async def admin_delete_event(interaction: discord.Interaction):
         )
         return
 
-    view = ConfirmActionView(lang, _do_delete_event)
+    view = ConfirmActionView(lang, _do_delete_event, db_id=db_id)
     await interaction.response.edit_message(
         embed=discord.Embed(description=t("confirm.delete_event", lang), color=discord.Color.orange()),
         view=view,
     )
 
 
-async def _do_delete_event(interaction: discord.Interaction):
+async def _do_delete_event(interaction: discord.Interaction, db_id: int):
     """Actually delete the event after confirmation."""
     settings = db.get_guild_settings(interaction.guild_id)
     lang = settings.get("language", "en") if settings else "en"
 
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if not record:
             await interaction.response.edit_message(
                 embed=discord.Embed(description=t("event.no_event", lang), color=discord.Color.red()),
@@ -2050,8 +2171,9 @@ class RemoveSuggestionView(ui.View):
     into 25-sized chunks. Each chunk becomes its own Select on its own row.
     """
 
-    def __init__(self, suggestions: list[dict], lang: str):
+    def __init__(self, suggestions: list[dict], lang: str, db_id: int):
         super().__init__(timeout=120)
+        self.db_id = db_id
         chunks = [
             suggestions[i:i + _REMOVE_PICKER_OPTIONS_PER_SELECT]
             for i in range(0, len(suggestions), _REMOVE_PICKER_OPTIONS_PER_SELECT)
@@ -2081,15 +2203,15 @@ class RemoveSuggestionSelect(ui.Select):
         self.lang = lang
 
     async def callback(self, interaction: discord.Interaction):
-        await admin_do_remove_suggestion(interaction, self.values[0])
+        await admin_do_remove_suggestion(interaction, self.view.db_id, self.values[0])
 
 
-async def admin_remove_suggestion(interaction: discord.Interaction):
+async def admin_remove_suggestion(interaction: discord.Interaction, db_id: int):
     """Render the picker view for choosing a suggestion to remove."""
     settings = db.get_guild_settings(interaction.guild_id)
     lang = settings.get("language", "en") if settings else "en"
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.edit_message(
             embed=discord.Embed(description=t("event.no_event", lang),
@@ -2115,12 +2237,12 @@ async def admin_remove_suggestion(interaction: discord.Interaction):
     )
     await interaction.response.edit_message(
         embed=embed,
-        view=RemoveSuggestionView(visible, lang),
+        view=RemoveSuggestionView(visible, lang, db_id),
     )
 
 
 async def admin_do_remove_suggestion(interaction: discord.Interaction,
-                                     suggestion_id: str):
+                                     db_id: int, suggestion_id: str):
     """Remove the chosen suggestion, refresh the event embed, and re-render
     the picker so the admin can remove more without reopening the panel.
     """
@@ -2131,7 +2253,7 @@ async def admin_do_remove_suggestion(interaction: discord.Interaction,
     remaining: list[dict] = []
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if not record:
             await interaction.response.edit_message(
                 embed=discord.Embed(description=t("event.no_event", lang),
@@ -2163,7 +2285,7 @@ async def admin_do_remove_suggestion(interaction: discord.Interaction,
     # Refresh the public event embed. The per-user suggestion limit is
     # computed live from event["suggestions"], so removal automatically frees
     # the slot for the original suggester.
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+    await _update_event_embed(db_id)
 
     await send_to_log_channel(
         f"Suggestion removed by {interaction.user.display_name}: "
@@ -2185,7 +2307,7 @@ async def admin_do_remove_suggestion(interaction: discord.Interaction,
         )
         await interaction.response.edit_message(
             embed=embed,
-            view=RemoveSuggestionView(visible, lang),
+            view=RemoveSuggestionView(visible, lang, db_id),
         )
     else:
         await interaction.response.edit_message(
@@ -2196,30 +2318,586 @@ async def admin_do_remove_suggestion(interaction: discord.Interaction,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# EVENT EMBED UPDATE
+# EVENT EDIT DIALOG (DM)
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# Admin → Edit on the event embed opens a private DM dialog where the
+# organizer can change this event's per-event configuration (gamemodes,
+# blacklists, suggestion limits, voting params) without affecting any other
+# event or the guild defaults. Replaces the old /config_gamemodes,
+# /config_layer_sources, /config_blacklist, /config_suggestions slash
+# commands; their picker UIs are reborn as views inside this dialog and
+# write to event["config"] / event[...] instead of guild_settings.
+#
+# Session model: a single DM message (kept on the in-memory session dict) is
+# re-rendered with different views for the property selector, list pickers,
+# bool toggles, and scalar modals. Component interactions edit that message
+# in place; modal submits edit it via the stored Message reference.
 
-_display_update_tasks: dict[tuple[int, int], asyncio.Task] = {}
+# user_id -> {db_id, guild_id, lang, dm_message}
+_active_edit_sessions: dict[int, dict] = {}
 
 
-async def _update_event_embed(guild_id: int, channel_id: int):
-    """Debounced update of the event embed message."""
-    key = (guild_id, channel_id)
-    task = _display_update_tasks.get(key)
-    if task and not task.done():
-        task.cancel()
-    _display_update_tasks[key] = asyncio.create_task(_do_update_embed(guild_id, channel_id))
+def _format_duration_seconds(seconds: int) -> str:
+    """Render seconds as '60', '2h', '1d' style — round-trip via parse_duration_to_seconds."""
+    s = int(seconds)
+    if s <= 0:
+        return "0"
+    if s % 86400 == 0:
+        return f"{s // 86400}d"
+    if s % 3600 == 0:
+        return f"{s // 3600}h"
+    if s % 60 == 0:
+        return f"{s // 60}m"
+    return f"{s}s"
 
 
-async def _do_update_embed(guild_id: int, channel_id: int):
-    """Actually update the event embed after a short delay."""
-    await asyncio.sleep(2)
+def _format_property_value(value, kind: str) -> str:
+    """Compact one-line display of a property's current value."""
+    if kind == "list":
+        if not value:
+            return "—"
+        joined = ", ".join(value[:5])
+        return joined + ("…" if len(value) > 5 else "")
+    if kind == "bool":
+        return "✅" if value else "❌"
+    if kind == "duration":
+        if not value:
+            return "—"
+        return _format_duration_seconds(int(value))
+    if value is None:
+        return "—"
+    return str(value)
 
-    record = db.get_event_by_channel(guild_id, channel_id)
+
+def _read_event_property(event: dict, key: str, target: str):
+    """Read a property's current value from event[key] or event["config"][key]."""
+    if target == "config":
+        return (event.get("config") or {}).get(key)
+    return event.get(key)
+
+
+def _write_event_property(event: dict, key: str, target: str, value) -> None:
+    """Write a property's value into event[key] or event["config"][key]."""
+    if target == "config":
+        event.setdefault("config", {})[key] = value
+    else:
+        event[key] = value
+
+
+# Properties exposed by the DM edit dialog. Keys live on either event["config"]
+# (the per-event snapshot of guild settings — Phase 2) or directly on the
+# event (sources, voting params, suggestion timer). `source` is a callable
+# returning the available choices for "list" kinds.
+_EDIT_PROPERTIES: list[dict] = [
+    {"key": "allowed_gamemodes",         "label_key": "edit.prop.allowed_gamemodes",     "kind": "list",     "target": "config", "source": db.get_unique_gamemodes},
+    {"key": "blacklisted_gamemodes",     "label_key": "edit.prop.blacklisted_gamemodes", "kind": "list",     "target": "config", "source": db.get_unique_gamemodes},
+    {"key": "blacklisted_maps",          "label_key": "edit.prop.blacklisted_maps",      "kind": "list",     "target": "config", "source": db.get_unique_maps},
+    {"key": "blacklisted_factions",      "label_key": "edit.prop.blacklisted_factions",  "kind": "list",     "target": "config", "source": db.get_unique_factions},
+    {"key": "blacklisted_units",         "label_key": "edit.prop.blacklisted_units",     "kind": "list",     "target": "config", "source": db.get_unique_unit_types},
+    {"key": "max_suggestions_per_user",  "label_key": "edit.prop.max_per_user",          "kind": "int",      "target": "config", "min": 1,  "max": 10},
+    {"key": "max_total_suggestions",     "label_key": "edit.prop.max_total",             "kind": "int",      "target": "config", "min": 1,  "max": 25},
+    {"key": "history_lookback_events",   "label_key": "edit.prop.history_lookback",      "kind": "int",      "target": "config", "min": 0,  "max": 50},
+    {"key": "allowed_sources",           "label_key": "edit.prop.allowed_sources",       "kind": "list",     "target": "event",  "source": db.get_unique_sources},
+    {"key": "voting_duration_hours",     "label_key": "edit.prop.voting_duration",       "kind": "int",      "target": "event",  "min": 1,  "max": MAX_VOTING_DURATION_HOURS},
+    {"key": "max_voting_layers",         "label_key": "edit.prop.max_voting_layers",     "kind": "int",      "target": "event",  "min": 1,  "max": 10},
+    {"key": "allow_multiple_votes",      "label_key": "edit.prop.allow_multiple_votes",  "kind": "bool",     "target": "event"},
+    {"key": "suggestion_duration_seconds", "label_key": "edit.prop.suggestion_duration", "kind": "duration", "target": "event"},
+]
+
+
+def _find_edit_property(key: str) -> Optional[dict]:
+    return next((p for p in _EDIT_PROPERTIES if p["key"] == key), None)
+
+
+def _build_edit_main_embed(event: dict, lang: str,
+                           updated_label: Optional[str] = None) -> discord.Embed:
+    """Property overview embed shown at the top of every DM dialog state."""
+    embed = discord.Embed(
+        title=t("edit.title", lang),
+        description=t("edit.select_property", lang),
+        color=discord.Color.blurple(),
+    )
+    for prop in _EDIT_PROPERTIES:
+        value = _read_event_property(event, prop["key"], prop["target"])
+        formatted = _format_property_value(value, prop["kind"])
+        embed.add_field(
+            name=t(prop["label_key"], lang),
+            value=f"`{formatted}`",
+            inline=True,
+        )
+    if updated_label:
+        embed.add_field(
+            name="​",
+            value=f"✅ {t('edit.updated_inline', lang, prop=updated_label)}",
+            inline=False,
+        )
+    return embed
+
+
+async def admin_edit_event(interaction: discord.Interaction, db_id: int):
+    """Kick off a DM edit session for this event. Triggered by Admin → Edit."""
+    user = interaction.user
+    settings = db.get_guild_settings(interaction.guild_id) or {}
+    lang = settings.get("language", "en")
+
+    if user.id in _active_edit_sessions:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("edit.session_active", lang), color=discord.Color.orange()),
+            view=None,
+        )
+        return
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang), color=discord.Color.red()),
+            view=None,
+        )
+        return
+
+    try:
+        dm = await user.create_dm()
+    except discord.Forbidden:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("edit.dm_blocked", lang), color=discord.Color.red()),
+            view=None,
+        )
+        return
+
+    # Reserve the session BEFORE the DM send so the view's callbacks can find it.
+    session: dict = {
+        "db_id": db_id,
+        "guild_id": interaction.guild_id,
+        "lang": lang,
+        "dm_message": None,
+    }
+    _active_edit_sessions[user.id] = session
+
+    embed = _build_edit_main_embed(record["event"], lang)
+    view = EditMainView(user.id, db_id, interaction.guild_id, lang)
+    try:
+        dm_msg = await dm.send(embed=embed, view=view)
+    except discord.Forbidden:
+        _active_edit_sessions.pop(user.id, None)
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("edit.dm_blocked", lang), color=discord.Color.red()),
+            view=None,
+        )
+        return
+    session["dm_message"] = dm_msg
+
+    await interaction.response.edit_message(
+        embed=discord.Embed(
+            description=f"📨 {t('edit.dm_sent', lang)}",
+            color=discord.Color.green(),
+        ),
+        view=None,
+    )
+
+
+def _close_session(user_id: int) -> None:
+    _active_edit_sessions.pop(user_id, None)
+
+
+async def _refresh_main_view(interaction: discord.Interaction, user_id: int,
+                             db_id: int, guild_id: int, lang: str,
+                             updated_label: Optional[str] = None,
+                             via_modal: bool = False) -> None:
+    """Re-render the property selector after an edit or cancel.
+
+    `via_modal=True` means the originating interaction is a Modal submission,
+    in which case we ack the modal and edit the stored DM message directly
+    (interaction.response.edit_message doesn't apply to modal submits).
+    """
+    record = db.get_event_by_db_id(guild_id, db_id)
+    if not record:
+        _close_session(user_id)
+        if via_modal:
+            try:
+                await interaction.response.send_message(
+                    t("event.no_event", lang), ephemeral=True)
+            except discord.InteractionResponded:
+                pass
+        else:
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=t("event.no_event", lang), color=discord.Color.red()),
+                view=None,
+            )
+        return
+
+    embed = _build_edit_main_embed(record["event"], lang, updated_label=updated_label)
+    view = EditMainView(user_id, db_id, guild_id, lang)
+
+    if via_modal:
+        # Acknowledge the modal silently, then edit the stored DM message.
+        try:
+            await interaction.response.defer()
+        except discord.InteractionResponded:
+            pass
+        session = _active_edit_sessions.get(user_id)
+        dm_msg = session.get("dm_message") if session else None
+        if dm_msg is not None:
+            await dm_msg.edit(embed=embed, view=view)
+    else:
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class EditMainView(ui.View):
+    """Top-level DM view: a property dropdown + a Done button."""
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+
+        options = [
+            discord.SelectOption(
+                label=t(prop["label_key"], lang)[:100],
+                value=prop["key"],
+            )
+            for prop in _EDIT_PROPERTIES
+        ]
+        select = ui.Select(
+            placeholder=t("edit.pick_property_placeholder", lang),
+            options=options,
+            min_values=1, max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+        done = ui.Button(
+            label=t("edit.done", lang),
+            style=discord.ButtonStyle.secondary,
+            emoji="🛑",
+        )
+        done.callback = self._on_done
+        self.add_item(done)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        prop = _find_edit_property(interaction.data["values"][0])
+        if not prop:
+            return
+        await _show_property_editor(interaction, self.user_id, self.db_id,
+                                    self.guild_id, self.lang, prop)
+
+    async def _on_done(self, interaction: discord.Interaction):
+        _close_session(self.user_id)
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("edit.finished", self.lang),
+                                color=discord.Color.greyple()),
+            view=None,
+        )
+
+    async def on_timeout(self):
+        _close_session(self.user_id)
+
+
+async def _show_property_editor(interaction: discord.Interaction, user_id: int,
+                                db_id: int, guild_id: int, lang: str,
+                                prop: dict) -> None:
+    """Render the editor UI for a specific property, replacing the main view."""
+    record = db.get_event_by_db_id(guild_id, db_id)
+    if not record:
+        _close_session(user_id)
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang), color=discord.Color.red()),
+            view=None,
+        )
         return
 
     event = record["event"]
+    current = _read_event_property(event, prop["key"], prop["target"])
+    label = t(prop["label_key"], lang)
+
+    if prop["kind"] == "list":
+        choices = prop["source"]() if prop.get("source") else []
+        if not choices:
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=t("cache.empty", lang), color=discord.Color.orange()),
+                view=EditMainView(user_id, db_id, guild_id, lang),
+            )
+            return
+        current_set = set(current or [])
+        # An empty `allowed_sources` means "all sources allowed" — preselect
+        # everything so the admin sees the effective state, mirroring the old
+        # /config_layer_sources behaviour.
+        if prop["key"] == "allowed_sources" and not current_set:
+            current_set = set(choices)
+        options = [
+            discord.SelectOption(label=c[:100], value=c, default=(c in current_set))
+            for c in choices[:25]
+        ]
+        view = EditListView(user_id, db_id, guild_id, lang, prop, options)
+        embed = discord.Embed(
+            title=label,
+            description=t("edit.list_prompt", lang),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    elif prop["kind"] == "bool":
+        view = EditBoolView(user_id, db_id, guild_id, lang, prop, bool(current))
+        embed = discord.Embed(
+            title=label,
+            description=t("edit.bool_prompt", lang,
+                          value=_format_property_value(current, "bool")),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    else:  # int / duration — both go through a Modal triggered by a button
+        view = EditScalarView(user_id, db_id, guild_id, lang, prop)
+        if prop["kind"] == "int":
+            desc = t("edit.int_prompt", lang,
+                     current=_format_property_value(current, "int"),
+                     min=prop.get("min", "—"), max=prop.get("max", "—"))
+        else:
+            desc = t("edit.duration_prompt", lang,
+                     current=_format_property_value(current, "duration"))
+        embed = discord.Embed(title=label, description=desc, color=discord.Color.blurple())
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class EditListView(ui.View):
+    """Multi-select editor for list-typed properties."""
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 prop: dict, options: list[discord.SelectOption]):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+        self.prop = prop
+
+        select = ui.Select(
+            placeholder=t("edit.list_placeholder", lang),
+            options=options,
+            min_values=0, max_values=len(options),
+        )
+        select.callback = self._on_save
+        self.add_item(select)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_save(self, interaction: discord.Interaction):
+        new_values = list(interaction.data.get("values", []))
+        await _apply_edit(interaction, self.user_id, self.db_id, self.guild_id,
+                          self.lang, self.prop, new_values)
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await _refresh_main_view(interaction, self.user_id, self.db_id,
+                                 self.guild_id, self.lang)
+
+
+class EditBoolView(ui.View):
+    """Two-button toggle for bool properties."""
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 prop: dict, current_value: bool):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+        self.prop = prop
+
+        yes = ui.Button(
+            label=t("edit.bool_yes", lang),
+            style=discord.ButtonStyle.success if current_value else discord.ButtonStyle.secondary,
+            emoji="✅",
+        )
+        yes.callback = self._make_setter(True)
+        self.add_item(yes)
+
+        no = ui.Button(
+            label=t("edit.bool_no", lang),
+            style=discord.ButtonStyle.danger if not current_value else discord.ButtonStyle.secondary,
+            emoji="❌",
+        )
+        no.callback = self._make_setter(False)
+        self.add_item(no)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    def _make_setter(self, value: bool):
+        async def cb(interaction: discord.Interaction):
+            await _apply_edit(interaction, self.user_id, self.db_id, self.guild_id,
+                              self.lang, self.prop, value)
+        return cb
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await _refresh_main_view(interaction, self.user_id, self.db_id,
+                                 self.guild_id, self.lang)
+
+
+class EditScalarView(ui.View):
+    """Wrapper for int/duration properties — opens a Modal on click.
+
+    Modals can only be opened from a component interaction, so we have to
+    chain Component → Modal rather than putting the TextInput in the view.
+    """
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 prop: dict):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+        self.prop = prop
+
+        edit = ui.Button(
+            label=t("edit.open_input", lang),
+            style=discord.ButtonStyle.primary, emoji="⌨️",
+        )
+        edit.callback = self._on_edit
+        self.add_item(edit)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        modal = EditScalarModal(self.user_id, self.db_id, self.guild_id,
+                                self.lang, self.prop)
+        await interaction.response.send_modal(modal)
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await _refresh_main_view(interaction, self.user_id, self.db_id,
+                                 self.guild_id, self.lang)
+
+
+class EditScalarModal(ui.Modal):
+    """Text-input modal for int / duration properties."""
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 prop: dict):
+        super().__init__(title=t(prop["label_key"], lang)[:45])
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+        self.prop = prop
+
+        if prop["kind"] == "int":
+            placeholder = f"{prop.get('min', 0)}–{prop.get('max', '?')}"
+        else:
+            placeholder = "60, 2h, 1d, 1w"
+        self.value_input = ui.TextInput(
+            label=t("edit.input_label", lang)[:45],
+            placeholder=placeholder,
+            required=True,
+            max_length=20,
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = (self.value_input.value or "").strip()
+        if self.prop["kind"] == "int":
+            try:
+                value = int(raw)
+            except ValueError:
+                await interaction.response.send_message(
+                    t("edit.invalid_int", self.lang, value=raw), ephemeral=True)
+                return
+            mn = self.prop.get("min")
+            mx = self.prop.get("max")
+            if (mn is not None and value < mn) or (mx is not None and value > mx):
+                await interaction.response.send_message(
+                    t("edit.out_of_range", self.lang, value=value, min=mn, max=mx),
+                    ephemeral=True,
+                )
+                return
+        else:  # duration
+            value = parse_duration_to_seconds(raw)
+            if value is None:
+                await interaction.response.send_message(
+                    t("phase.invalid_duration", self.lang, value=raw), ephemeral=True)
+                return
+
+        await _apply_edit(interaction, self.user_id, self.db_id, self.guild_id,
+                          self.lang, self.prop, value, via_modal=True)
+
+
+async def _apply_edit(interaction: discord.Interaction, user_id: int,
+                      db_id: int, guild_id: int, lang: str,
+                      prop: dict, value, via_modal: bool = False) -> None:
+    """Persist an edit, refresh the public event embed, return to main view."""
+    lock = _get_guild_lock(guild_id)
+    async with lock:
+        record = db.get_event_by_db_id(guild_id, db_id)
+        if not record:
+            _close_session(user_id)
+            if via_modal:
+                try:
+                    await interaction.response.send_message(
+                        t("event.no_event", lang), ephemeral=True)
+                except discord.InteractionResponded:
+                    pass
+            else:
+                await interaction.response.edit_message(
+                    embed=discord.Embed(description=t("event.no_event", lang),
+                                        color=discord.Color.red()),
+                    view=None,
+                )
+            return
+        event = record["event"]
+        _write_event_property(event, prop["key"], prop["target"], value)
+        db.save_event(record["db_id"], event)
+
+    # Refresh the in-channel event embed so users see the new config.
+    await _update_event_embed(db_id)
+
+    label = t(prop["label_key"], lang)
+    await _refresh_main_view(interaction, user_id, db_id, guild_id, lang,
+                             updated_label=label, via_modal=via_modal)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EVENT EMBED UPDATE
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Keyed by event db_id rather than (guild,channel) since multiple events may
+# share a channel; debouncing must be per-event.
+_display_update_tasks: dict[int, asyncio.Task] = {}
+
+
+async def _update_event_embed(db_id: int):
+    """Debounced update of a specific event's embed message."""
+    task = _display_update_tasks.get(db_id)
+    if task and not task.done():
+        task.cancel()
+    _display_update_tasks[db_id] = asyncio.create_task(_do_update_embed(db_id))
+
+
+async def _do_update_embed(db_id: int):
+    """Actually update the event embed after a short delay."""
+    await asyncio.sleep(2)
+
+    record = db.get_active_event_unsafe(db_id)
+    if not record:
+        return
+    guild_id = record["guild_id"]
+    channel_id = record["channel_id"]
+    event = record["event"]
+
     settings = db.get_guild_settings(guild_id)
     if not settings:
         return
@@ -2243,7 +2921,7 @@ async def _do_update_embed(guild_id: int, channel_id: int):
         if phase == "completed":
             await message.edit(embed=embed, view=None)
         else:
-            await message.edit(embed=embed, view=EventActionView(lang))
+            await message.edit(embed=embed, view=EventActionView(db_id, lang))
     except discord.NotFound:
         logger.warning(f"Event message {msg_id} not found in {channel_id}")
     except Exception as e:
@@ -2323,7 +3001,7 @@ async def cmd_set_language(interaction: discord.Interaction, language: app_comma
     # Refresh all active event embeds in this guild so the language change takes effect
     for ev in db.get_all_active_events_global():
         if ev["guild_id"] == interaction.guild_id:
-            await _update_event_embed(ev["guild_id"], ev["channel_id"])
+            await _update_event_embed(ev["db_id"])
 
 
 @bot.tree.command(name="set_log_channel", description="Change the log channel")
@@ -2365,226 +3043,14 @@ async def cmd_sync(interaction: discord.Interaction):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SLASH COMMANDS — Layer & Blacklist Config
+# Per-event configuration is edited via the Admin → Edit DM dialog (see the
+# `EVENT EDIT DIALOG` section). The previous /config_gamemodes,
+# /config_layer_sources, /config_blacklist, and /config_suggestions slash
+# commands wrote to guild-wide settings, which leaked across every event in
+# the channel — they were removed in Phase 3 along with their picker views
+# (BlacklistConfigView / GamemodeConfigView / SourceConfigView), whose logic
+# now lives inside the DM dialog and writes to event["config"] instead.
 # ═══════════════════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="config_gamemodes", description="Configure allowed gamemodes")
-async def cmd_config_gamemodes(interaction: discord.Interaction):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-    all_modes = db.get_unique_gamemodes()
-    if not all_modes:
-        await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
-        return
-
-    current = settings.get("allowed_gamemodes", [])
-    options = [
-        discord.SelectOption(label=m, value=m, default=(m in current))
-        for m in all_modes[:25]
-    ]
-
-    view = GamemodeConfigView(options, lang)
-    await interaction.response.send_message(
-        t("vote.select_layers", lang, max=len(all_modes)), view=view, ephemeral=True)
-
-
-class GamemodeConfigView(ui.View):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
-        super().__init__(timeout=120)
-        self.lang = lang
-        self.add_item(GamemodeSelect(options, lang))
-
-
-class GamemodeSelect(ui.Select):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
-        super().__init__(placeholder="Select gamemodes", options=options,
-                         min_values=1, max_values=len(options))
-        self.lang = lang
-
-    async def callback(self, interaction: discord.Interaction):
-        settings = db.get_guild_settings(interaction.guild_id)
-        if not settings:
-            return
-        settings["allowed_gamemodes"] = self.values
-        db.save_guild_settings(interaction.guild_id, settings)
-        await interaction.response.edit_message(
-            content=t("config.gamemodes_updated", self.lang, modes=", ".join(self.values)),
-            view=None,
-        )
-
-
-@bot.tree.command(name="config_layer_sources",
-                  description="Configure which layer sources are offered when creating events")
-async def cmd_config_layer_sources(interaction: discord.Interaction):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-    all_sources = db.get_unique_sources()
-    if not all_sources:
-        await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
-        return
-
-    # An empty stored value means "all sources allowed" — pre-select everything
-    # so the admin sees the effective state.
-    current = settings.get("allowed_sources", []) or all_sources
-    options = [
-        discord.SelectOption(label=s, value=s, default=(s in current))
-        for s in all_sources[:25]
-    ]
-    view = SourceConfigView(options, lang)
-    await interaction.response.send_message(
-        t("config.sources_prompt", lang, count=len(all_sources)),
-        view=view, ephemeral=True,
-    )
-
-
-class SourceConfigView(ui.View):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
-        super().__init__(timeout=120)
-        self.lang = lang
-        self.add_item(SourceConfigSelect(options, lang))
-
-
-class SourceConfigSelect(ui.Select):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
-        super().__init__(placeholder=t("config.sources_placeholder", lang),
-                         options=options, min_values=1, max_values=len(options))
-        self.lang = lang
-
-    async def callback(self, interaction: discord.Interaction):
-        settings = db.get_guild_settings(interaction.guild_id)
-        if not settings:
-            return
-        settings["allowed_sources"] = list(self.values)
-        db.save_guild_settings(interaction.guild_id, settings)
-        await interaction.response.edit_message(
-            content=t("config.sources_updated", self.lang, sources=", ".join(self.values)),
-            view=None,
-        )
-        await send_to_log_channel(
-            f"Allowed layer sources updated: {', '.join(self.values)}",
-            guild_id=interaction.guild_id,
-        )
-
-
-@bot.tree.command(name="config_blacklist", description="Manage blacklist (maps, factions, units)")
-@app_commands.describe(blacklist_type="What to blacklist")
-@app_commands.choices(blacklist_type=[
-    app_commands.Choice(name="Maps", value="maps"),
-    app_commands.Choice(name="Factions", value="factions"),
-    app_commands.Choice(name="Unit Types", value="units"),
-])
-async def cmd_config_blacklist(interaction: discord.Interaction,
-                               blacklist_type: app_commands.Choice[str]):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-    bl_type = blacklist_type.value
-
-    if bl_type == "maps":
-        all_items = db.get_unique_maps()
-        current = settings.get("blacklisted_maps", [])
-        settings_key = "blacklisted_maps"
-    elif bl_type == "factions":
-        all_items = db.get_unique_factions()
-        current = settings.get("blacklisted_factions", [])
-        settings_key = "blacklisted_factions"
-    elif bl_type == "units":
-        all_items = db.get_unique_unit_types()
-        current = settings.get("blacklisted_units", [])
-        settings_key = "blacklisted_units"
-    else:
-        return
-
-    if not all_items:
-        await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
-        return
-
-    options = [
-        discord.SelectOption(label=item, value=item, default=(item in current))
-        for item in all_items[:25]
-    ]
-
-    view = BlacklistConfigView(options, lang, settings_key, bl_type)
-    await interaction.response.send_message(
-        f"Select items to blacklist ({bl_type}):", view=view, ephemeral=True)
-
-
-class BlacklistConfigView(ui.View):
-    def __init__(self, options: list[discord.SelectOption], lang: str,
-                 settings_key: str, bl_type: str):
-        super().__init__(timeout=120)
-        self.lang = lang
-        self.settings_key = settings_key
-        self.bl_type = bl_type
-        self.add_item(BlacklistSelect(options, lang, settings_key, bl_type))
-
-
-class BlacklistSelect(ui.Select):
-    def __init__(self, options: list[discord.SelectOption], lang: str,
-                 settings_key: str, bl_type: str):
-        super().__init__(placeholder=f"Select {bl_type} to blacklist", options=options,
-                         min_values=0, max_values=len(options))
-        self.lang = lang
-        self.settings_key = settings_key
-        self.bl_type = bl_type
-
-    async def callback(self, interaction: discord.Interaction):
-        settings = db.get_guild_settings(interaction.guild_id)
-        if not settings:
-            return
-
-        new_values = list(self.values)
-
-        settings[self.settings_key] = new_values
-        db.save_guild_settings(interaction.guild_id, settings)
-        await interaction.response.edit_message(
-            content=t("config.blacklist_updated", self.lang,
-                       type=self.bl_type, items=", ".join(new_values) or "None"),
-            view=None,
-        )
-
-
-@bot.tree.command(name="config_suggestions", description="Configure suggestion settings")
-@app_commands.describe(
-    max_per_user="Maximum suggestions per user (1-10)",
-    max_total="Maximum total suggestions across all users (1-25)",
-    history_lookback="Block suggestions from last N events (0 to disable)",
-)
-async def cmd_config_suggestions(interaction: discord.Interaction,
-                                 max_per_user: int = None,
-                                 max_total: int = None,
-                                 history_lookback: int = None):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-
-    if max_per_user is not None:
-        settings["max_suggestions_per_user"] = max(1, min(10, max_per_user))
-    if max_total is not None:
-        settings["max_total_suggestions"] = max(1, min(25, max_total))
-    if history_lookback is not None:
-        settings["history_lookback_events"] = max(0, min(50, history_lookback))
-
-    db.save_guild_settings(interaction.guild_id, settings)
-    await interaction.response.send_message(t("config.suggestions_updated", lang), ephemeral=True)
 
 
 @bot.tree.command(name="config_create_suggestion",
@@ -2705,10 +3171,6 @@ async def cmd_create_event(interaction: discord.Interaction,
 
     lang = settings.get("language", "en")
 
-    if db.channel_has_active_event(interaction.guild_id, interaction.channel_id):
-        await interaction.response.send_message(t("event.already_exists", lang), ephemeral=True)
-        return
-
     if db.get_layer_cache_count() == 0:
         await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
         return
@@ -2816,24 +3278,24 @@ async def _finalize_event_creation(interaction: discord.Interaction, settings: d
                                    ack_via_followup: bool):
     """Create the event row and post its embed. Used by both the no-picker path
     (single source) and the EventSourceSelectView confirm callback."""
-    event_data = db.build_default_event(suggestion_start_time=sst)
+    event_data = db.build_default_event(suggestion_start_time=sst, settings=settings)
     event_data["voting_duration_hours"] = max(1, min(MAX_VOTING_DURATION_HOURS, voting_duration_hours))
     event_data["suggestion_duration_seconds"] = suggestion_duration_seconds
     event_data["allow_multiple_votes"] = bool(allow_multiple_votes)
     event_data["allowed_sources"] = list(allowed_sources)
 
-    # Create event in DB first
-    db.create_event(interaction.guild_id, interaction.channel_id, event_data)
+    # Create event in DB first to get its db_id; the EventActionView and the
+    # follow-up update both need it baked into their button custom_ids.
+    db_id = db.create_event(interaction.guild_id, interaction.channel_id, event_data)
 
-    # Post the event embed
     embed = build_event_embed(event_data, settings)
-    view = EventActionView(lang)
+    view = EventActionView(db_id, lang)
     msg = await interaction.channel.send(embed=embed, view=view)
 
     # Save message ID
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if record:
             event = record["event"]
             event["event_message_id"] = msg.id
@@ -2883,13 +3345,6 @@ class EventSourceSelectView(ui.View):
             await interaction.response.send_message(
                 t("event.select_sources_required", self.lang), ephemeral=True)
             return
-        # Re-check that no event was created in this channel while picker was open.
-        if db.channel_has_active_event(interaction.guild_id, interaction.channel_id):
-            await interaction.response.edit_message(
-                content=t("event.already_exists", self.lang),
-                embed=None, view=None,
-            )
-            return
         settings = db.get_guild_settings(interaction.guild_id) or {}
         await _finalize_event_creation(
             interaction, settings, self.lang,
@@ -2923,10 +3378,14 @@ async def cmd_open_suggestions(interaction: discord.Interaction, duration: str =
                 t("phase.invalid_duration", lang, value=duration), ephemeral=True)
             return
 
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
     lock = _get_guild_lock(interaction.guild_id)
     end_time = None
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if not record:
             await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
             return
@@ -2949,7 +3408,7 @@ async def cmd_open_suggestions(interaction: discord.Interaction, duration: str =
         ack_text = t("phase.suggestions_opened", lang)
 
     await interaction.response.send_message(f"✅ {ack_text}", ephemeral=True)
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+    await _update_event_embed(db_id)
     await send_to_log_channel(ack_text, guild_id=interaction.guild_id)
 
 
@@ -2963,7 +3422,11 @@ async def cmd_close_suggestions(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return
@@ -2973,7 +3436,7 @@ async def cmd_close_suggestions(interaction: discord.Interaction):
         await interaction.response.send_message(t("phase.not_open", lang), ephemeral=True)
         return
 
-    view = ConfirmActionView(lang, _do_close_suggestions)
+    view = ConfirmActionView(lang, _do_close_suggestions, db_id=db_id)
     await interaction.response.send_message(
         embed=discord.Embed(description=t("confirm.close_suggestions", lang), color=discord.Color.orange()),
         view=view,
@@ -2992,7 +3455,11 @@ async def cmd_start_vote(interaction: discord.Interaction, duration_hours: str =
 
     lang = settings.get("language", "en")
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return
@@ -3016,7 +3483,7 @@ async def cmd_start_vote(interaction: discord.Interaction, duration_hours: str =
             return
         lock = _get_guild_lock(interaction.guild_id)
         async with lock:
-            record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+            record = db.get_event_by_db_id(interaction.guild_id, db_id)
             if record:
                 event = record["event"]
                 event["voting_duration_hours"] = parsed_hours
@@ -3024,68 +3491,22 @@ async def cmd_start_vote(interaction: discord.Interaction, duration_hours: str =
 
     captured_ids = list(selected)
 
-    async def _do_start(confirm_interaction: discord.Interaction):
+    async def _do_start(confirm_interaction: discord.Interaction, _db_id: int):
         lock = _get_guild_lock(confirm_interaction.guild_id)
         async with lock:
-            rec = db.get_event_by_channel(confirm_interaction.guild_id, confirm_interaction.channel_id)
+            rec = db.get_event_by_db_id(confirm_interaction.guild_id, _db_id)
             if not rec:
                 return
             ev = rec["event"]
             ev["phase"] = "voting"
             db.save_event(rec["db_id"], ev)
-        await _start_poll(confirm_interaction, captured_ids)
+        await _start_poll(confirm_interaction, _db_id, captured_ids)
 
-    view = ConfirmActionView(lang, _do_start)
+    view = ConfirmActionView(lang, _do_start, db_id=db_id)
     await interaction.response.send_message(
         embed=discord.Embed(description=t("confirm.start_vote", lang), color=discord.Color.orange()),
         view=view,
         ephemeral=True,
-    )
-
-
-async def _start_poll_from_command(interaction: discord.Interaction, selected_ids: list[str]):
-    """Start a poll from the slash command (deferred response)."""
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
-    if not record:
-        return
-
-    event = record["event"]
-    settings = db.get_guild_settings(interaction.guild_id)
-    lang = settings.get("language", "en") if settings else "en"
-    suggestions = event.get("suggestions", [])
-    duration_hours = event.get("voting_duration_hours", 24)
-
-    selected = [s for s in suggestions if s.get("id") in selected_ids]
-    if not selected:
-        await interaction.followup.send(t("vote.no_suggestions", lang), ephemeral=True)
-        return
-
-    poll = discord.Poll(
-        question=t("vote.poll_question", lang),
-        duration=timedelta(hours=duration_hours),
-        multiple=bool(event.get("allow_multiple_votes", False)),
-    )
-    for s in selected[:10]:
-        poll.add_answer(text=format_layer_poll_option(s))
-
-    channel = interaction.channel
-    poll_message = await channel.send(poll=poll)
-
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
-        if record:
-            event = record["event"]
-            event["poll_message_id"] = poll_message.id
-            event["phase"] = "voting"
-            db.save_event(record["db_id"], event)
-
-    await interaction.followup.send(
-        f"✅ {t('vote.started', lang, hours=duration_hours)}", ephemeral=True)
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
-    await send_to_log_channel(
-        f"Voting started with {len(selected)} layers for {duration_hours}h",
-        guild_id=interaction.guild_id,
     )
 
 
@@ -3099,9 +3520,13 @@ async def cmd_end_vote(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
-        record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if not record:
             await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
             return
@@ -3130,7 +3555,7 @@ async def cmd_end_vote(interaction: discord.Interaction):
         desc = f"✅ {t('vote.ended', lang)}\n{t('vote.no_winner', lang)}"
 
     await interaction.response.send_message(desc, ephemeral=True)
-    await _update_event_embed(interaction.guild_id, interaction.channel_id)
+    await _update_event_embed(db_id)
     await send_to_log_channel(
         f"Voting ended. Winner: {format_layer_short(winner) if winner else 'None'}",
         guild_id=interaction.guild_id,
@@ -3147,12 +3572,16 @@ async def cmd_delete_event(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return
 
-    view = ConfirmActionView(lang, _do_delete_event)
+    view = ConfirmActionView(lang, _do_delete_event, db_id=db_id)
     await interaction.response.send_message(
         embed=discord.Embed(description=t("confirm.delete_event", lang), color=discord.Color.orange()),
         view=view,
@@ -3170,7 +3599,11 @@ async def cmd_select_for_vote(interaction: discord.Interaction):
 
     lang = settings.get("language", "en")
 
-    record = db.get_event_by_channel(interaction.guild_id, interaction.channel_id)
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return
@@ -3407,7 +3840,7 @@ async def cmd_history_remove(interaction: discord.Interaction):
 # BACKGROUND TASK — Check events loop
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def _handle_suggestion_timeout(guild_id: int, channel_id: int):
+async def _handle_suggestion_timeout(db_id: int, guild_id: int, channel_id: int):
     """Fire when a suggestion phase's auto-close timer expires.
 
     - If suggestions count fits in max_voting_layers: phase -> voting and
@@ -3426,7 +3859,7 @@ async def _handle_suggestion_timeout(guild_id: int, channel_id: int):
 
     lock = _get_guild_lock(guild_id)
     async with lock:
-        rec = db.get_event_by_channel(guild_id, channel_id)
+        rec = db.get_event_by_db_id(guild_id, db_id)
         if not rec:
             return
         event = rec["event"]
@@ -3457,7 +3890,7 @@ async def _handle_suggestion_timeout(guild_id: int, channel_id: int):
         db.save_event(rec["db_id"], event)
 
     if auto_started_ids:
-        ok = await _auto_start_poll(guild_id, channel_id, auto_started_ids)
+        ok = await _auto_start_poll(db_id, auto_started_ids)
         if ok:
             await send_to_log_channel(
                 t("phase.auto_vote_started", lang, count=len(auto_started_ids)),
@@ -3468,14 +3901,14 @@ async def _handle_suggestion_timeout(guild_id: int, channel_id: int):
         # the organizer can still act.
         lock2 = _get_guild_lock(guild_id)
         async with lock2:
-            rec = db.get_event_by_channel(guild_id, channel_id)
+            rec = db.get_event_by_db_id(guild_id, db_id)
             if rec and rec["event"].get("phase") == "voting":
                 rec["event"]["phase"] = "suggestions_closed"
                 rec["event"]["selected_for_vote"] = []
                 db.save_event(rec["db_id"], rec["event"])
         needs_selection = True
 
-    await _update_event_embed(guild_id, channel_id)
+    await _update_event_embed(db_id)
 
     if needs_selection:
         mention = f"<@&{organizer_role_id}>" if organizer_role_id else ""
@@ -3516,6 +3949,7 @@ async def check_events_loop():
                 event = record["event"]
                 guild_id = record["guild_id"]
                 channel_id = record["channel_id"]
+                db_id = record["db_id"]
                 phase = event.get("phase", "created")
 
                 # Auto-open suggestions
@@ -3526,7 +3960,7 @@ async def check_events_loop():
                         if seconds_until <= 0:
                             lock = _get_guild_lock(guild_id)
                             async with lock:
-                                rec = db.get_event_by_channel(guild_id, channel_id)
+                                rec = db.get_event_by_db_id(guild_id, db_id)
                                 if rec and rec["event"].get("phase") == "created":
                                     rec["event"]["phase"] = "suggestions_open"
                                     # Propagate the optional auto-close window
@@ -3537,7 +3971,7 @@ async def check_events_loop():
                                             now + timedelta(seconds=int(dur))
                                         )
                                     db.save_event(rec["db_id"], rec["event"])
-                            await _update_event_embed(guild_id, channel_id)
+                            await _update_event_embed(db_id)
                             await send_to_log_channel(
                                 f"Suggestion phase auto-opened in <#{channel_id}>",
                                 guild_id=guild_id,
@@ -3551,7 +3985,7 @@ async def check_events_loop():
                     if set_end and isinstance(set_end, datetime):
                         seconds_until = (set_end - now).total_seconds()
                         if seconds_until <= 0:
-                            await _handle_suggestion_timeout(guild_id, channel_id)
+                            await _handle_suggestion_timeout(db_id, guild_id, channel_id)
                         elif seconds_until < EVENT_CRITICAL_WINDOW:
                             sleep_time = EVENT_CHECK_INTERVAL_FAST
 
@@ -3568,7 +4002,7 @@ async def check_events_loop():
                                     if message.poll and message.poll.is_finalised():
                                         lock = _get_guild_lock(guild_id)
                                         async with lock:
-                                            rec = db.get_event_by_channel(guild_id, channel_id)
+                                            rec = db.get_event_by_db_id(guild_id, db_id)
                                             if rec and rec["event"].get("phase") == "voting":
                                                 winner = await _resolve_poll_winner(channel, rec["event"])
                                                 rec["event"]["phase"] = "completed"
@@ -3580,7 +4014,7 @@ async def check_events_loop():
                                                         rec["event"].get("suggestions", []),
                                                         winner,
                                                     )
-                                        await _update_event_embed(guild_id, channel_id)
+                                        await _update_event_embed(db_id)
                                         winner_str = format_layer_short(winner) if winner else "None"
                                         await send_to_log_channel(
                                             f"Poll ended in <#{channel_id}>. Winner: {winner_str}",

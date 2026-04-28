@@ -438,21 +438,63 @@ def get_unique_sources() -> list[str]:
 # Events — one active event per (guild, channel)
 # ---------------------------------------------------------------------------
 
-def get_event_by_channel(guild_id: int, channel_id: int) -> Optional[dict]:
-    """Return the active event for a channel, or None."""
+def get_active_event_unsafe(db_id: int) -> Optional[dict]:
+    """Return an active event by db_id without a guild filter.
+
+    Reserved for trusted internal callers (background tasks, debounced
+    refreshes) where the db_id is already known to belong to this bot.
+    Public-interaction code paths must use get_event_by_db_id, which enforces
+    guild_id as a security boundary.
+    """
     conn = _get_conn()
     row = conn.execute(
-        """SELECT id, event_data
-           FROM events
-           WHERE guild_id = ? AND channel_id = ? AND status = 'active'
-           LIMIT 1""",
-        (guild_id, channel_id),
+        "SELECT id, guild_id, channel_id, event_data FROM events WHERE id = ? AND status = 'active'",
+        (db_id,),
     ).fetchone()
     conn.close()
     if row is None:
         return None
-    event_data = _loads(row[1])
-    return {"db_id": row[0], "event": event_data}
+    return {
+        "db_id": row[0],
+        "guild_id": row[1],
+        "channel_id": row[2],
+        "event": _loads(row[3]),
+    }
+
+
+def get_event_by_db_id(guild_id: int, db_id: int) -> Optional[dict]:
+    """Return a specific active event by its DB row id, or None.
+
+    guild_id is enforced as a security boundary so cross-guild button
+    interactions can't load each other's events.
+    """
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT id, event_data, channel_id
+           FROM events
+           WHERE id = ? AND guild_id = ? AND status = 'active'
+           LIMIT 1""",
+        (db_id, guild_id),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {"db_id": row[0], "event": _loads(row[1]), "channel_id": row[2]}
+
+
+def get_active_events_in_channel(guild_id: int, channel_id: int) -> list[dict]:
+    """Return all active events in a channel (multiple are allowed)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT id, event_data
+           FROM events
+           WHERE guild_id = ? AND channel_id = ? AND status = 'active'
+           ORDER BY id""",
+        (guild_id, channel_id),
+    ).fetchall()
+    conn.close()
+    return [{"db_id": row[0], "event": _loads(row[1]), "channel_id": channel_id}
+            for row in rows]
 
 
 def get_all_active_events_global() -> list[dict]:
@@ -526,15 +568,6 @@ def delete_event(db_id: int):
     logger.info(f"Event deleted: db_id={db_id}")
 
 
-def channel_has_active_event(guild_id: int, channel_id: int) -> bool:
-    """Check if a channel already has an active event."""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT 1 FROM events WHERE guild_id = ? AND channel_id = ? AND status = 'active' LIMIT 1",
-        (guild_id, channel_id),
-    ).fetchone()
-    conn.close()
-    return row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -607,8 +640,47 @@ def get_blocked_suggestions(guild_id: int, channel_id: int, lookback: int) -> li
     return blocked
 
 
-def build_default_event(suggestion_start_time=None) -> dict:
-    """Build a fresh event data dict."""
+# Guild-settings keys that get snapshotted into event["config"] at creation
+# time. After Phase 2, every layer suggestion event carries its own copy of
+# these values so admins can edit them per-event via the DM edit dialog
+# without affecting other events or the guild defaults.
+EVENT_CONFIG_KEYS: tuple[str, ...] = (
+    "allowed_gamemodes",
+    "blacklisted_maps",
+    "blacklisted_gamemodes",
+    "blacklisted_factions",
+    "blacklisted_units",
+    "max_suggestions_per_user",
+    "max_total_suggestions",
+    "history_lookback_events",
+)
+
+
+def _snapshot_event_config(settings: Optional[dict]) -> dict:
+    """Build the per-event config dict from a guild settings dict."""
+    src = settings or DEFAULT_GUILD_SETTINGS
+    snapshot: dict = {}
+    for key in EVENT_CONFIG_KEYS:
+        value = src.get(key, DEFAULT_GUILD_SETTINGS.get(key))
+        # Defensive copy for mutable types so later edits don't bleed into
+        # the guild settings dict.
+        if isinstance(value, list):
+            snapshot[key] = list(value)
+        elif isinstance(value, dict):
+            snapshot[key] = dict(value)
+        else:
+            snapshot[key] = value
+    return snapshot
+
+
+def build_default_event(suggestion_start_time=None,
+                        settings: Optional[dict] = None) -> dict:
+    """Build a fresh event data dict.
+
+    `settings` is the guild settings dict at creation time; the event
+    captures a snapshot of the relevant keys (see EVENT_CONFIG_KEYS) so
+    each event has its own independently-editable configuration.
+    """
     return {
         "phase": "created",
         "event_message_id": None,
@@ -627,4 +699,9 @@ def build_default_event(suggestion_start_time=None) -> dict:
         # the admin at /create_layer_suggestion time (defaults to the guild's
         # allowed_sources setting).
         "allowed_sources": [],
+        # Per-event snapshot of guild settings that influence the suggestion
+        # flow. Edited via the Admin → Edit DM dialog without affecting other
+        # events. Readers should call _event_settings(event, guild_settings)
+        # in bot.py to merge this with guild fallbacks.
+        "config": _snapshot_event_config(settings),
     }

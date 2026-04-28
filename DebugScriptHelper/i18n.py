@@ -150,6 +150,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Kein aktives Event in diesem Kanal.",
         "en": "No active event in this channel.",
     },
+    "event.multiple_in_channel": {
+        "de": "Mehrere aktive Events in diesem Kanal — bitte den Admin-Button auf dem jeweiligen Event-Embed verwenden.",
+        "en": "Multiple active events in this channel — please use the Admin button on the specific event embed.",
+    },
     "event.select_sources_title": {
         "de": "Layer-Quellen auswählen",
         "en": "Select layer sources",
@@ -592,6 +596,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Event löschen",
         "en": "Delete Event",
     },
+    "admin.edit_event": {
+        "de": "Event bearbeiten",
+        "en": "Edit Event",
+    },
     "admin.random_count_label": {
         "de": "Anzahl zufälliger Layers",
         "en": "Number of random layers",
@@ -623,6 +631,142 @@ _STRINGS: dict[str, dict[str, str]] = {
     "admin.remove_not_found": {
         "de": "Vorschlag nicht gefunden (möglicherweise bereits entfernt).",
         "en": "Suggestion not found (it may have already been removed).",
+    },
+
+    # ── Event edit DM dialog ─────────────────────────────────────────────
+    "edit.title": {
+        "de": "Event-Konfiguration bearbeiten",
+        "en": "Edit Event Configuration",
+    },
+    "edit.select_property": {
+        "de": "Wähle eine Eigenschaft zum Bearbeiten — Änderungen gelten nur für dieses Event.",
+        "en": "Pick a property to edit — changes apply to this event only.",
+    },
+    "edit.pick_property_placeholder": {
+        "de": "Eigenschaft auswählen",
+        "en": "Select a property",
+    },
+    "edit.dm_sent": {
+        "de": "Bearbeitungsdialog wurde dir per DM geschickt.",
+        "en": "Edit dialog sent to your DMs.",
+    },
+    "edit.dm_blocked": {
+        "de": "Konnte keine DM senden — bitte erlaube DMs von Server-Mitgliedern.",
+        "en": "Couldn't open a DM — please allow DMs from server members.",
+    },
+    "edit.session_active": {
+        "de": "Du hast bereits eine offene Bearbeitungssitzung. Schließe diese zuerst.",
+        "en": "You already have an active edit session — close it first.",
+    },
+    "edit.done": {
+        "de": "Fertig",
+        "en": "Done",
+    },
+    "edit.finished": {
+        "de": "Bearbeitung abgeschlossen.",
+        "en": "Edit session closed.",
+    },
+    "edit.list_prompt": {
+        "de": "Wähle die gewünschten Werte aus und bestätige (Auswahl speichert sofort).",
+        "en": "Select the desired values — your choice saves immediately.",
+    },
+    "edit.list_placeholder": {
+        "de": "Werte auswählen",
+        "en": "Select values",
+    },
+    "edit.bool_prompt": {
+        "de": "Aktueller Wert: {value}. Wähle einen neuen Wert.",
+        "en": "Current value: {value}. Pick a new value.",
+    },
+    "edit.bool_yes": {
+        "de": "Ja",
+        "en": "Yes",
+    },
+    "edit.bool_no": {
+        "de": "Nein",
+        "en": "No",
+    },
+    "edit.int_prompt": {
+        "de": "Aktuell: `{current}` (Bereich {min}–{max}). Klicke ⌨️, um einen neuen Wert einzugeben.",
+        "en": "Current: `{current}` (range {min}–{max}). Click ⌨️ to enter a new value.",
+    },
+    "edit.duration_prompt": {
+        "de": "Aktuell: `{current}`. Klicke ⌨️, um einen neuen Wert einzugeben (z.B. `60`, `2h`, `1d`).",
+        "en": "Current: `{current}`. Click ⌨️ to enter a new value (e.g. `60`, `2h`, `1d`).",
+    },
+    "edit.open_input": {
+        "de": "Wert eingeben",
+        "en": "Enter value",
+    },
+    "edit.input_label": {
+        "de": "Neuer Wert",
+        "en": "New value",
+    },
+    "edit.invalid_int": {
+        "de": "Ungültige Zahl: `{value}`.",
+        "en": "Invalid number: `{value}`.",
+    },
+    "edit.out_of_range": {
+        "de": "Wert {value} außerhalb des erlaubten Bereichs ({min}–{max}).",
+        "en": "Value {value} is outside the allowed range ({min}–{max}).",
+    },
+    "edit.updated_inline": {
+        "de": "**{prop}** aktualisiert.",
+        "en": "**{prop}** updated.",
+    },
+
+    # Edit dialog property labels
+    "edit.prop.allowed_gamemodes": {
+        "de": "Erlaubte Spielmodi",
+        "en": "Allowed Gamemodes",
+    },
+    "edit.prop.blacklisted_gamemodes": {
+        "de": "Gesperrte Spielmodi",
+        "en": "Blacklisted Gamemodes",
+    },
+    "edit.prop.blacklisted_maps": {
+        "de": "Gesperrte Maps",
+        "en": "Blacklisted Maps",
+    },
+    "edit.prop.blacklisted_factions": {
+        "de": "Gesperrte Fraktionen",
+        "en": "Blacklisted Factions",
+    },
+    "edit.prop.blacklisted_units": {
+        "de": "Gesperrte Einheitstypen",
+        "en": "Blacklisted Unit Types",
+    },
+    "edit.prop.max_per_user": {
+        "de": "Max. Vorschläge pro Nutzer",
+        "en": "Max Suggestions per User",
+    },
+    "edit.prop.max_total": {
+        "de": "Max. Vorschläge insgesamt",
+        "en": "Max Total Suggestions",
+    },
+    "edit.prop.history_lookback": {
+        "de": "History-Lookback (Events)",
+        "en": "History Lookback (events)",
+    },
+    "edit.prop.allowed_sources": {
+        "de": "Erlaubte Layer-Quellen",
+        "en": "Allowed Layer Sources",
+    },
+    "edit.prop.voting_duration": {
+        "de": "Abstimmungsdauer (Stunden)",
+        "en": "Voting Duration (hours)",
+    },
+    "edit.prop.max_voting_layers": {
+        "de": "Max. Layers in Abstimmung",
+        "en": "Max Voting Layers",
+    },
+    "edit.prop.allow_multiple_votes": {
+        "de": "Mehrfachstimmen erlauben",
+        "en": "Allow Multiple Votes",
+    },
+    "edit.prop.suggestion_duration": {
+        "de": "Vorschlagsphasen-Dauer",
+        "en": "Suggestion Phase Duration",
     },
 }
 
