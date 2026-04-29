@@ -487,8 +487,8 @@ _STRINGS: dict[str, dict[str, str]] = {
 
     # ── Voting thread (private thread created at /start_vote) ─────────────
     "thread.voting_name": {
-        "de": "Abstimmung",
-        "en": "Voting",
+        "de": "Abstimmung — {period}",
+        "en": "Voting — {period}",
     },
     "thread.voting_welcome": {
         "de": "🗳️ Berechtigte Mitglieder können hier abstimmen.",

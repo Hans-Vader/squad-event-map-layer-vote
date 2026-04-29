@@ -295,7 +295,7 @@ def format_layer_poll_option(suggestion: dict) -> str:
 
     gm_short = _GAMEMODE_ABBREV.get(gamemode, gamemode)
     mode_str = f"{gm_short}{version}".strip() if version else gm_short
-    text = f"{map_name} {mode_str} {t1_faction} ({t1_unit}) vs {t2_faction} ({t2_unit})"
+    text = f"{map_name} {mode_str} {t1_faction}({t1_unit}) vs {t2_faction}({t2_unit})"
     if len(text) > 55:
         text = text[:52] + "..."
     return text

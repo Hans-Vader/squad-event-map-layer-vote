@@ -2025,6 +2025,25 @@ async def _resolve_poll_target(channel: discord.abc.Messageable, event: dict) ->
     return thread or channel
 
 
+_MONTH_NAMES_BY_LANG: dict[str, list[str]] = {
+    "en": ["", "January", "February", "March", "April", "May", "June",
+           "July", "August", "September", "October", "November", "December"],
+    "de": ["", "Januar", "Februar", "März", "April", "Mai", "Juni",
+           "Juli", "August", "September", "Oktober", "November", "Dezember"],
+}
+
+
+def _current_month_year_label(lang: str) -> str:
+    """Localized "<MonthName> <Year>" for the current date.
+
+    Used in voting-thread names. Avoids strftime("%B") because that
+    depends on the host system's LC_TIME, which we don't control.
+    """
+    now = datetime.now()
+    months = _MONTH_NAMES_BY_LANG.get(lang) or _MONTH_NAMES_BY_LANG["en"]
+    return f"{months[now.month]} {now.year}"
+
+
 async def _create_voting_thread(channel: discord.TextChannel, event: dict,
                                  lang: str) -> Optional[discord.Thread]:
     """Create the private voting thread and pre-populate its members.
@@ -2041,7 +2060,7 @@ async def _create_voting_thread(channel: discord.TextChannel, event: dict,
 
     try:
         thread = await channel.create_thread(
-            name=t("thread.voting_name", lang),
+            name=t("thread.voting_name", lang, period=_current_month_year_label(lang)),
             type=discord.ChannelType.private_thread,
             invitable=False,  # only the bot/mods can add others
             auto_archive_duration=10080,  # 7 days
