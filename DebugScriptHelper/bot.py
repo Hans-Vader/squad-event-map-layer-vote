@@ -595,38 +595,76 @@ def _faction_select_options(factions: list[dict]) -> list[discord.SelectOption]:
     ]
 
 
-def extract_unit_prefix(default_unit: str, faction_id: str) -> Optional[str]:
-    """Extract the middle token from a defaultUnit string.
+# Loadout-prefix tokens that appear between the faction marker and the unit
+# type in a defaultUnit string (e.g. "ADF_LO_CombinedArms"). Discovered by
+# scanning both layers.json and spm_layers.json — same set in both, the SPM
+# variant just adds extra suffixes (-Boats, _SuperMod, …) after the type.
+_UNIT_PREFIX_MARKERS = ("LO", "LD", "MO", "MD", "S", "Seed")
 
-    `ADF_LO_CombinedArms`  -> `LO`
-    `ADF_LD_CombinedArms`  -> `LD`
-    `ADF_S_CombinedArms_Seed` -> `S`
-    Returns None if the string doesn't match the expected pattern.
+# Canonical unit-type names as the user expects to see them. The SPM source
+# decorates the type with extra qualifiers ("CombinedArms-Boats_SuperMod",
+# "CombinedArms_2BB_Boats", …) — we collapse those back to the canonical name
+# so the dropdown stays clean and dedup against the `types` array works.
+_KNOWN_UNIT_TYPES = (
+    "CombinedArms", "AirAssault", "Mechanized", "Armored",
+    "Motorized", "LightInfantry", "Support", "SpecialForces",
+    "AntiTank", "AmphibiousAssault",
+)
+
+
+def extract_unit_prefix(default_unit: str, faction_id: Optional[str] = None) -> Optional[str]:
+    """Extract the loadout-prefix token (LO, LD, MO, MD, S, Seed) from a defaultUnit.
+
+    Scans for the marker directly so it doesn't matter whether factionId is
+    a prefix of defaultUnit — handles the SPM cases where factionId is
+    "SU_ADF" but defaultUnit is "ADF_LO_..." or even "PLAGF_2010_LO_..." with
+    an era qualifier between the faction marker and the loadout token.
+
+    `faction_id` is accepted for backward compatibility but is no longer used.
     """
-    if not default_unit or not faction_id:
+    if not default_unit:
         return None
-    prefix = f"{faction_id}_"
-    if not default_unit.startswith(prefix):
-        return None
-    remainder = default_unit[len(prefix):]
-    token, _, _ = remainder.partition("_")
-    return token or None
+    for part in default_unit.split("_"):
+        if part in _UNIT_PREFIX_MARKERS:
+            return part
+    return None
 
 
-def _extract_default_unit_type(default_unit: str, faction_id: str) -> Optional[str]:
-    """Extract the unit type suffix from a defaultUnit string.
+def _extract_default_unit_type(default_unit: str, faction_id: Optional[str] = None) -> Optional[str]:
+    """Extract the canonical unit-type name (e.g. ``CombinedArms``) from a defaultUnit.
 
-    `ADF_LO_CombinedArms`       -> `CombinedArms`
-    `ADF_S_CombinedArms_Seed`   -> `CombinedArms_Seed`
+    Generic across both layers.json and spm_layers.json:
+
+      ``ADF_LO_CombinedArms``                -> ``CombinedArms``
+      ``ADF_LO_CombinedArms-Boats_SuperMod`` -> ``CombinedArms``  (SPM suffix)
+      ``PLAGF_2010_LO_CombinedArms-Boats``   -> ``CombinedArms``  (era qualifier)
+      ``UKSF_LO_SpecialForces_Boats``        -> ``SpecialForces``
+      ``ADF_S_CombinedArms_Seed``            -> ``CombinedArms``
+      ``FSTemplate_IMF``                     -> None  (no marker)
+
+    Strategy: locate the loadout-prefix marker, then match the remainder
+    against the canonical type list. `faction_id` is accepted for backward
+    compatibility but not used — the SPM source has factionIds like
+    ``SU_ADF`` that are not prefixes of ``ADF_LO_...``, which broke the old
+    string-prefix approach.
     """
-    if not default_unit or not faction_id:
+    if not default_unit:
         return None
-    prefix = f"{faction_id}_"
-    if not default_unit.startswith(prefix):
-        return None
-    remainder = default_unit[len(prefix):]
-    _, _, rest = remainder.partition("_")
-    return rest or None
+    parts = default_unit.split("_")
+    for i, part in enumerate(parts):
+        if part not in _UNIT_PREFIX_MARKERS or i + 1 >= len(parts):
+            continue
+        tail = "_".join(parts[i + 1:])
+        for known in _KNOWN_UNIT_TYPES:
+            if tail == known:
+                return known
+            # Boundary check: the char after the canonical name must be a
+            # separator so we don't match "Combined" inside a longer token.
+            if tail.startswith(known) and not tail[len(known)].isalpha():
+                return known
+        # No canonical match — return the first sub-token (split on _ or -).
+        return re.split(r"[-_]", tail, maxsplit=1)[0] or None
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
