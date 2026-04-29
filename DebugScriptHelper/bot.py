@@ -2623,12 +2623,14 @@ class EditMainView(ui.View):
 
     async def _on_done(self, interaction: discord.Interaction):
         _close_session(self.user_id)
+        # Keep the overview embed visible; just strip the dropdown + Done
+        # button, then append the closing line as a new DM message below.
         try:
-            await interaction.response.defer()
-        except discord.InteractionResponded:
+            await interaction.response.edit_message(view=None)
+        except discord.HTTPException:
             pass
         try:
-            await interaction.message.delete()
+            await interaction.channel.send(t("edit.finished", self.lang))
         except discord.HTTPException:
             pass
 

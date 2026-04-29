@@ -662,6 +662,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Fertig",
         "en": "Done",
     },
+    "edit.finished": {
+        "de": "Bearbeitung abgeschlossen.",
+        "en": "Edit session closed.",
+    },
     "edit.timeout": {
         "de": "Ich bin mir nicht sicher, wohin du gegangen bist. Wir können es später erneut versuchen.",
         "en": "I'm not sure where you went. We can try again later.",
