@@ -57,7 +57,6 @@ DEFAULT_GUILD_SETTINGS = {
     "language": "en",
     "allowed_gamemodes": ["AAS", "RAAS", "Invasion", "TerritoryControl", "Destruction", "Insurgency"],
     "blacklisted_maps": [],
-    "blacklisted_gamemodes": [],
     "blacklisted_factions": [],
     "blacklisted_units": [],
     "max_suggestions_per_user": 2,
@@ -295,7 +294,6 @@ def get_unique_maps(excluded_maps: list[str] = None,
 
 
 def get_modes_for_map(map_name: str, allowed_gamemodes: list[str] = None,
-                      blacklisted_gamemodes: list[str] = None,
                       allowed_sources: Optional[list[str]] = None) -> list[dict]:
     """Return available mode+version combos for a map.
 
@@ -314,8 +312,6 @@ def get_modes_for_map(map_name: str, allowed_gamemodes: list[str] = None,
     results = []
     for gamemode, version, raw_name, source in rows:
         if allowed_gamemodes and gamemode not in allowed_gamemodes:
-            continue
-        if blacklisted_gamemodes and gamemode in blacklisted_gamemodes:
             continue
         display = gamemode
         if version:
@@ -647,7 +643,6 @@ def get_blocked_suggestions(guild_id: int, channel_id: int, lookback: int) -> li
 EVENT_CONFIG_KEYS: tuple[str, ...] = (
     "allowed_gamemodes",
     "blacklisted_maps",
-    "blacklisted_gamemodes",
     "blacklisted_factions",
     "blacklisted_units",
     "max_suggestions_per_user",

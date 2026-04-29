@@ -720,10 +720,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Erlaubte Spielmodi",
         "en": "Allowed Gamemodes",
     },
-    "edit.prop.blacklisted_gamemodes": {
-        "de": "Gesperrte Spielmodi",
-        "en": "Blacklisted Gamemodes",
-    },
     "edit.prop.blacklisted_maps": {
         "de": "Gesperrte Maps",
         "en": "Blacklisted Maps",

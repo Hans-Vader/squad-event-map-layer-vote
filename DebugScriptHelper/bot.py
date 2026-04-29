@@ -1002,7 +1002,6 @@ class MapSelect(ui.Select):
         modes = db.get_modes_for_map(
             state.map_name,
             allowed_gamemodes=event_settings.get("allowed_gamemodes", []),
-            blacklisted_gamemodes=event_settings.get("blacklisted_gamemodes", []),
             allowed_sources=source_filter,
         )
 
@@ -2391,7 +2390,6 @@ def _write_event_property(event: dict, key: str, target: str, value) -> None:
 # returning the available choices for "list" kinds.
 _EDIT_PROPERTIES: list[dict] = [
     {"key": "allowed_gamemodes",         "label_key": "edit.prop.allowed_gamemodes",     "kind": "list",     "target": "config", "source": db.get_unique_gamemodes},
-    {"key": "blacklisted_gamemodes",     "label_key": "edit.prop.blacklisted_gamemodes", "kind": "list",     "target": "config", "source": db.get_unique_gamemodes},
     {"key": "blacklisted_maps",          "label_key": "edit.prop.blacklisted_maps",      "kind": "list",     "target": "config", "source": db.get_unique_maps},
     {"key": "blacklisted_factions",      "label_key": "edit.prop.blacklisted_factions",  "kind": "list",     "target": "config", "source": db.get_unique_factions},
     {"key": "blacklisted_units",         "label_key": "edit.prop.blacklisted_units",     "kind": "list",     "target": "config", "source": db.get_unique_unit_types},
