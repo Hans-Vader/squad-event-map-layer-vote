@@ -3251,6 +3251,15 @@ async def _apply_edit(interaction: discord.Interaction, user_id: int,
 # share a channel; debouncing must be per-event.
 _display_update_tasks: dict[int, asyncio.Task] = {}
 
+# Live vote-count refresh cadence. Short enough that the embed feels live
+# during a 24h vote; long enough to stay well clear of Discord's per-channel
+# message-edit rate limits even with multiple concurrent voting events.
+LIVE_VOTE_REFRESH_SECONDS = 120
+
+# db_id -> datetime of last live-vote embed refresh; throttles the periodic
+# refresh in check_events_loop so we don't burn API calls every loop tick.
+_last_vote_embed_refresh: dict[int, datetime] = {}
+
 
 async def _update_event_embed(db_id: int):
     """Debounced update of a specific event's embed message."""
@@ -3258,6 +3267,36 @@ async def _update_event_embed(db_id: int):
     if task and not task.done():
         task.cancel()
     _display_update_tasks[db_id] = asyncio.create_task(_do_update_embed(db_id))
+
+
+async def _fetch_vote_counts(target: discord.abc.Messageable, event: dict) -> dict:
+    """Read live per-suggestion vote counts from the poll message.
+
+    Returns {suggestion_id: vote_count} for layers in the poll. Empty dict
+    on any error — callers should treat that as "live counts unavailable"
+    and fall back to a count-less embed.
+    """
+    poll_msg_id = event.get("poll_message_id")
+    if not poll_msg_id:
+        return {}
+    try:
+        msg = await target.fetch_message(poll_msg_id)
+    except (discord.NotFound, discord.HTTPException):
+        return {}
+    if not getattr(msg, "poll", None):
+        return {}
+
+    text_to_count = {a.text: a.vote_count for a in msg.poll.answers}
+    selected_ids = set(event.get("selected_for_vote") or [])
+    counts: dict = {}
+    for s in event.get("suggestions", []):
+        sid = s.get("id")
+        if sid not in selected_ids:
+            continue
+        text = format_layer_poll_option(s)
+        if text in text_to_count:
+            counts[sid] = text_to_count[text]
+    return counts
 
 
 async def _do_update_embed(db_id: int):
@@ -3275,7 +3314,6 @@ async def _do_update_embed(db_id: int):
     if not settings:
         return
 
-    embed = build_event_embed(event, settings)
     msg_id = event.get("event_message_id")
     if not msg_id:
         return
@@ -3287,6 +3325,16 @@ async def _do_update_embed(db_id: int):
         channel = guild.get_channel(channel_id)
         if not channel:
             return
+
+        # Fetch live vote counts during voting so the embed shows running
+        # totals next to each polled layer. Failures degrade gracefully to
+        # a count-less embed.
+        vote_counts = None
+        if event.get("phase") == "voting":
+            target = await _resolve_poll_target(channel, event)
+            vote_counts = await _fetch_vote_counts(target, event)
+
+        embed = build_event_embed(event, settings, vote_counts=vote_counts)
         message = await channel.fetch_message(msg_id)
 
         lang = settings.get("language", "en")
@@ -4461,6 +4509,16 @@ async def check_events_loop():
                             await _handle_suggestion_timeout(db_id, guild_id, channel_id)
                         elif seconds_until < EVENT_CRITICAL_WINDOW:
                             sleep_time = EVENT_CHECK_INTERVAL_FAST
+
+                # Refresh the embed periodically so live vote counts stay
+                # current while the poll is still running. Throttled to
+                # LIVE_VOTE_REFRESH_SECONDS per event.
+                if phase == "voting":
+                    last_refresh = _last_vote_embed_refresh.get(db_id)
+                    if (last_refresh is None or
+                            (now - last_refresh).total_seconds() >= LIVE_VOTE_REFRESH_SECONDS):
+                        _last_vote_embed_refresh[db_id] = now
+                        await _update_event_embed(db_id)
 
                 # Check if poll has ended (voting phase)
                 if phase == "voting":

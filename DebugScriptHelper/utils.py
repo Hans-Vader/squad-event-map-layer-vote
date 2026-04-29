@@ -348,8 +348,15 @@ def _embed_total_chars(embed: Embed) -> int:
     return total
 
 
-def build_event_embed(event: dict, settings: dict) -> Embed:
-    """Build the main event embed displayed in the channel."""
+def build_event_embed(event: dict, settings: dict,
+                      vote_counts: Optional[dict] = None) -> Embed:
+    """Build the main event embed displayed in the channel.
+
+    During the voting phase, callers can pass `vote_counts` (mapping
+    suggestion id → live vote_count from the poll) to render per-layer
+    counts inline. Suggestions not in `selected_for_vote` aren't part of
+    the poll and stay countless.
+    """
     phase = event.get("phase", "created")
     lang = settings.get("language", "en")
 
@@ -406,7 +413,17 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
     if phase in ("suggestions_open", "suggestions_closed", "voting"):
         header = f"📋 {t('embed.suggestions_header', lang)} ({len(suggestions)})"
         if suggestions:
-            entries = [format_suggestion_entry(i, s) for i, s in enumerate(suggestions, 1)]
+            selected_ids = set(event.get("selected_for_vote") or [])
+            show_counts = phase == "voting" and vote_counts is not None
+
+            def _entry_with_count(idx: int, sug: dict) -> str:
+                base = format_suggestion_entry(idx, sug)
+                if show_counts and sug.get("id") in selected_ids:
+                    count = vote_counts.get(sug.get("id"), 0)
+                    base += f" · 🗳️ **{count}**"
+                return base
+
+            entries = [_entry_with_count(i, s) for i, s in enumerate(suggestions, 1)]
 
             # Split entries across multiple fields (each ≤1024 chars)
             fields: list[str] = []
