@@ -3663,30 +3663,23 @@ class EventScheduleModal(ui.Modal):
         self.lang = lang
         self.offered_sources = list(offered_sources)
 
-        # Pre-fill date/time from guild default offset, if any.
-        prefill_date = ""
-        prefill_time = ""
+        # Pre-fill start datetime from guild default offset, if any.
+        prefill_start = ""
         default_offset = settings.get("default_suggestion_start") or ""
         if default_offset:
             offset_secs = parse_duration_to_seconds(default_offset)
             if offset_secs is not None:
                 target = datetime.now() + timedelta(seconds=offset_secs)
-                prefill_date = target.strftime("%d.%m.%Y")
-                prefill_time = target.strftime("%H:%M")
+                prefill_start = target.strftime("%d.%m.%Y %H:%M")
 
         sug_default = settings.get("default_suggestion_duration") or ""
         vote_hours = int(settings.get("default_voting_duration_hours", 24) or 24)
         vote_default = f"{vote_hours}h"
 
-        self.start_date = ui.TextInput(
-            label=t("event.wizard_start_date_label", lang),
-            placeholder="DD.MM.YYYY",
-            required=False, max_length=10, default=prefill_date,
-        )
-        self.start_time = ui.TextInput(
-            label=t("event.wizard_start_time_label", lang),
-            placeholder="HH:MM",
-            required=False, max_length=5, default=prefill_time,
+        self.start = ui.TextInput(
+            label=t("event.wizard_start_label", lang),
+            placeholder="DD.MM.YYYY HH:MM",
+            required=False, max_length=16, default=prefill_start,
         )
         self.sug_duration = ui.TextInput(
             label=t("event.wizard_suggestion_duration_label", lang),
@@ -3698,28 +3691,22 @@ class EventScheduleModal(ui.Modal):
             placeholder=DURATION_HINT,
             required=True, max_length=10, default=vote_default,
         )
-        self.add_item(self.start_date)
-        self.add_item(self.start_time)
+        self.add_item(self.start)
         self.add_item(self.sug_duration)
         self.add_item(self.vote_duration)
 
     async def on_submit(self, interaction: discord.Interaction):
         lang = self.lang
 
-        # Strictly absolute: both date+time required together (or both empty).
-        d_raw = self.start_date.value.strip()
-        t_raw = self.start_time.value.strip()
+        # Single combined "DD.MM.YYYY HH:MM" field; empty = manual phase.
+        start_raw = self.start.value.strip()
         sst: Optional[datetime] = None
-        if d_raw or t_raw:
-            if not (d_raw and t_raw):
-                await interaction.response.send_message(
-                    t("event.wizard_date_time_both_or_neither", lang), ephemeral=True)
-                return
+        if start_raw:
             try:
-                sst = datetime.strptime(f"{d_raw} {t_raw}", "%d.%m.%Y %H:%M")
+                sst = datetime.strptime(start_raw, "%d.%m.%Y %H:%M")
             except ValueError:
                 await interaction.response.send_message(
-                    t("event.wizard_invalid_date_time", lang, value=f"{d_raw} {t_raw}"),
+                    t("event.wizard_invalid_date_time", lang, value=start_raw),
                     ephemeral=True)
                 return
 

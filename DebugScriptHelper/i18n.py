@@ -522,13 +522,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Neues Layer-Vote-Event",
         "en": "New layer vote event",
     },
-    "event.wizard_start_date_label": {
-        "de": "Start-Datum (DD.MM.YYYY) — leer = manuell",
-        "en": "Start date (DD.MM.YYYY) — empty = manual",
-    },
-    "event.wizard_start_time_label": {
-        "de": "Start-Uhrzeit (HH:MM) — leer = manuell",
-        "en": "Start time (HH:MM) — empty = manual",
+    "event.wizard_start_label": {
+        "de": "Start (DD.MM.YYYY HH:MM) — leer = manuell",
+        "en": "Start (DD.MM.YYYY HH:MM) — empty = manual",
     },
     "event.wizard_suggestion_duration_label": {
         "de": "Vorschlagsphase-Dauer — leer = manuell",
@@ -537,10 +533,6 @@ _STRINGS: dict[str, dict[str, str]] = {
     "event.wizard_vote_duration_label": {
         "de": "Abstimmungs-Dauer (max. 14 Tage)",
         "en": "Voting duration (max 14 days)",
-    },
-    "event.wizard_date_time_both_or_neither": {
-        "de": "Bitte Datum und Uhrzeit gemeinsam angeben oder beide leer lassen.",
-        "en": "Please provide both date and time, or leave both empty.",
     },
     "event.wizard_invalid_date_time": {
         "de": "Ungültiges Datum/Uhrzeit: `{value}`. Format: `DD.MM.YYYY HH:MM`.",
