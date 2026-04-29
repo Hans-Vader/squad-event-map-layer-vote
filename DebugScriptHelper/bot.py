@@ -2500,6 +2500,21 @@ def _close_session(user_id: int) -> None:
     _active_edit_sessions.pop(user_id, None)
 
 
+def _event_message_url(guild_id: int, db_id: int) -> Optional[str]:
+    """Build a Discord deep-link to the event's public message, or None.
+
+    Returns None if the event is gone or its embed message hasn't been
+    posted yet.
+    """
+    record = db.get_event_by_db_id(guild_id, db_id)
+    if not record:
+        return None
+    msg_id = record["event"].get("event_message_id")
+    if not msg_id:
+        return None
+    return f"https://discord.com/channels/{guild_id}/{record['channel_id']}/{msg_id}"
+
+
 def _set_active_view(user_id: int, view: ui.View) -> None:
     """Mark `view` as the currently displayed dialog view for this session.
 
@@ -2629,8 +2644,12 @@ class EditMainView(ui.View):
             await interaction.response.edit_message(view=None)
         except discord.HTTPException:
             pass
+        text = t("edit.finished", self.lang)
+        url = _event_message_url(self.guild_id, self.db_id)
+        if url:
+            text = f"{text} [{t('edit.event_link', self.lang)}]({url})"
         try:
-            await interaction.channel.send(t("edit.finished", self.lang))
+            await interaction.channel.send(text)
         except discord.HTTPException:
             pass
 
