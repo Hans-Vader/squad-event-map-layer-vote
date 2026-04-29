@@ -48,14 +48,32 @@ if not TOKEN:
 # Duration parsing ("60" -> 3600s, "2h" -> 7200s, "1d" -> 86400s)
 # ---------------------------------------------------------------------------
 
-def parse_duration_to_seconds(value: str) -> Optional[int]:
-    """Parse a duration string. Bare numbers are treated as minutes.
+_DEFAULT_DURATION_MIN_SECONDS = 60
+_DEFAULT_DURATION_MAX_SECONDS = 30 * 86400  # 30 days
 
-    Returns seconds (clamped to [60, 30*86400]) or None when unparseable/empty.
+# Standard placeholder/example string used wherever a duration is entered.
+# Keep in sync with parse_duration_to_seconds — bare number = minutes,
+# suffixes m/h/d/w supported.
+DURATION_HINT = "60m, 2h, 1d, 1w"
+
+
+def parse_duration_to_seconds(value: str,
+                              min_seconds: int = _DEFAULT_DURATION_MIN_SECONDS,
+                              max_seconds: int = _DEFAULT_DURATION_MAX_SECONDS,
+                              ) -> Optional[int]:
+    """Parse a duration string into seconds. Bare numbers are minutes.
+
+    Suffixes: m (minutes), h (hours), d (days), w (weeks). Result clamped
+    to [min_seconds, max_seconds]. Returns None for empty/unparseable
+    input or non-positive values.
+
+    Single source of truth for duration input across the bot — every
+    slash command, modal field, and edit-dialog validator routes here so
+    that "60" / "2h" / "1d" all mean the same thing wherever they appear.
     """
-    if not value:
+    if value is None:
         return None
-    v = value.strip().lower()
+    v = str(value).strip().lower()
     if not v:
         return None
     mult = 60  # default: minutes
@@ -73,39 +91,28 @@ def parse_duration_to_seconds(value: str) -> Optional[int]:
         return None
     if seconds <= 0:
         return None
-    return max(60, min(seconds, 30 * 86400))
+    return max(min_seconds, min(seconds, max_seconds))
 
 
 # Max voting duration: two weeks, in hours.
 MAX_VOTING_DURATION_HOURS = 2 * 7 * 24  # 336h
+_VOTING_MIN_SECONDS = 3600  # 1h — voting field stores hours, smaller values would round to 0
+_VOTING_MAX_SECONDS = MAX_VOTING_DURATION_HOURS * 3600
 
 
-def parse_voting_duration_to_hours(value: str) -> Optional[int]:
-    """Parse a voting-duration string into hours.
+def parse_voting_duration_input(value: str) -> Optional[int]:
+    """Parse a voting-duration input into hours, using the unified duration parser.
 
-    Bare numbers are treated as hours (e.g. "24" = 24h). Suffixes h/d/w are
-    supported. Result is clamped to [1, MAX_VOTING_DURATION_HOURS]. Returns
-    None if the input is empty or unparseable.
+    Bare numbers are minutes (matching every other duration field in the bot).
+    Returns hours (the storage unit for `voting_duration_hours`), clamped to
+    [1, MAX_VOTING_DURATION_HOURS]. Inputs below 1h round up to 1h.
     """
-    if value is None:
+    seconds = parse_duration_to_seconds(value, min_seconds=_VOTING_MIN_SECONDS,
+                                        max_seconds=_VOTING_MAX_SECONDS)
+    if seconds is None:
         return None
-    v = str(value).strip().lower()
-    if not v:
-        return None
-    mult_hours = 1  # default: hours
-    if v.endswith("h"):
-        v = v[:-1]
-    elif v.endswith("d"):
-        v, mult_hours = v[:-1], 24
-    elif v.endswith("w"):
-        v, mult_hours = v[:-1], 7 * 24
-    try:
-        hours = int(float(v) * mult_hours)
-    except (TypeError, ValueError):
-        return None
-    if hours <= 0:
-        return None
-    return max(1, min(hours, MAX_VOTING_DURATION_HOURS))
+    # round to nearest hour, min 1
+    return max(1, round(seconds / 3600))
 
 # ---------------------------------------------------------------------------
 # Map name overrides (shorten long names at import time)
@@ -2661,6 +2668,11 @@ def _format_property_value(value, kind: str) -> str:
         if not value:
             return "—"
         return _format_duration_seconds(int(value))
+    if kind == "vote_duration":
+        if not value:
+            return "—"
+        # value is stored as hours; reuse the seconds formatter for consistency.
+        return _format_duration_seconds(int(value) * 3600)
     if value is None:
         return "—"
     return str(value)
@@ -2694,7 +2706,7 @@ _EDIT_PROPERTIES: list[dict] = [
     {"key": "max_total_suggestions",     "label_key": "edit.prop.max_total",             "kind": "int",      "target": "config", "min": 1,  "max": 25},
     {"key": "history_lookback_events",   "label_key": "edit.prop.history_lookback",      "kind": "int",      "target": "config", "min": 0,  "max": 50},
     {"key": "allowed_sources",           "label_key": "edit.prop.allowed_sources",       "kind": "list",     "target": "event",  "source": db.get_unique_sources},
-    {"key": "voting_duration_hours",     "label_key": "edit.prop.voting_duration",       "kind": "int",      "target": "event",  "min": 1,  "max": MAX_VOTING_DURATION_HOURS},
+    {"key": "voting_duration_hours",     "label_key": "edit.prop.voting_duration",       "kind": "vote_duration", "target": "event"},
     {"key": "max_voting_layers",         "label_key": "edit.prop.max_voting_layers",     "kind": "int",      "target": "event",  "min": 1,  "max": 10},
     {"key": "allow_multiple_votes",      "label_key": "edit.prop.allow_multiple_votes",  "kind": "bool",     "target": "event"},
     {"key": "suggestion_duration_seconds", "label_key": "edit.prop.suggestion_duration", "kind": "duration", "target": "event"},
@@ -3011,7 +3023,7 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
         )
         await interaction.response.edit_message(embed=embed, view=view)
 
-    else:  # int / duration — both go through a Modal triggered by a button
+    else:  # int / duration / vote_duration — all go through a Modal
         view = EditScalarView(user_id, db_id, guild_id, lang, prop)
         _set_active_view(user_id, view)
         if prop["kind"] == "int":
@@ -3020,7 +3032,7 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
                      min=prop.get("min", "—"), max=prop.get("max", "—"))
         else:
             desc = t("edit.duration_prompt", lang,
-                     current=_format_property_value(current, "duration"))
+                     current=_format_property_value(current, prop["kind"]))
         embed = discord.Embed(title=label, description=desc, color=discord.Color.blurple())
         await interaction.response.edit_message(embed=embed, view=view)
 
@@ -3172,7 +3184,7 @@ class EditScalarModal(ui.Modal):
         if prop["kind"] == "int":
             placeholder = f"{prop.get('min', 0)}–{prop.get('max', '?')}"
         else:
-            placeholder = "60, 2h, 1d, 1w"
+            placeholder = DURATION_HINT
         self.value_input = ui.TextInput(
             label=t("edit.input_label", lang)[:45],
             placeholder=placeholder,
@@ -3197,6 +3209,12 @@ class EditScalarModal(ui.Modal):
                     t("edit.out_of_range", self.lang, value=value, min=mn, max=mx),
                     ephemeral=True,
                 )
+                return
+        elif self.prop["kind"] == "vote_duration":
+            value = parse_voting_duration_input(raw)
+            if value is None:
+                await interaction.response.send_message(
+                    t("phase.invalid_duration", self.lang, value=raw), ephemeral=True)
                 return
         else:  # duration
             value = parse_duration_to_seconds(raw)
@@ -3475,9 +3493,9 @@ async def cmd_sync(interaction: discord.Interaction):
 @bot.tree.command(name="config_create_suggestion",
                   description="Set defaults for /create_layer_suggestion parameters")
 @app_commands.describe(
-    suggestion_start="Default offset to auto-open suggestions after command run (e.g. '1h', '30m'). Empty string clears.",
-    suggestion_duration="Default suggestion window length (e.g. '60', '2h'). Empty string clears.",
-    voting_duration_hours="Default vote length: bare number = hours, or '24h' / '2d' / '1w'. Max '2w' (14 days).",
+    suggestion_start=f"Default auto-open offset after the command runs ({DURATION_HINT}). Empty clears.",
+    suggestion_duration=f"Default suggestion window length ({DURATION_HINT}). Empty clears.",
+    voting_duration_hours=f"Default vote length ({DURATION_HINT}). Max 14 days. Bare number = minutes.",
     allow_multiple_votes="Default for allowing multiple poll votes per user",
 )
 async def cmd_config_create_suggestion(interaction: discord.Interaction,
@@ -3520,7 +3538,7 @@ async def cmd_config_create_suggestion(interaction: discord.Interaction,
             settings["default_suggestion_duration"] = stripped
 
     if voting_duration_hours is not None:
-        parsed_voting_hours = parse_voting_duration_to_hours(voting_duration_hours)
+        parsed_voting_hours = parse_voting_duration_input(voting_duration_hours)
         if parsed_voting_hours is None:
             await interaction.response.send_message(
                 t("phase.invalid_duration", lang, value=voting_duration_hours),
@@ -3570,18 +3588,14 @@ async def cmd_refresh_layers(interaction: discord.Interaction):
 # SLASH COMMANDS — Event Management
 # ═══════════════════════════════════════════════════════════════════════════
 
-@bot.tree.command(name="create_layer_suggestion", description="Create a new layer vote event in this channel")
-@app_commands.describe(
-    suggestion_start="When to auto-open suggestions (DD.MM.YYYY HH:MM) or leave empty for manual",
-    suggestion_duration="Suggestion window length, e.g. '60' (mins), '2h', '1d'. Empty = manual close.",
-    voting_duration_hours="Vote length: bare number = hours, or '24h' / '2d' / '1w'. Max '2w' (14 days).",
-    allow_multiple_votes="Allow each voter to pick multiple layers in the poll",
-)
-async def cmd_create_event(interaction: discord.Interaction,
-                           suggestion_start: str = None,
-                           suggestion_duration: str = None,
-                           voting_duration_hours: str = None,
-                           allow_multiple_votes: bool = None):
+@bot.tree.command(name="create_layer_suggestion",
+                  description="Create a new layer vote event in this channel")
+async def cmd_create_event(interaction: discord.Interaction):
+    """Open the event-creation wizard (modal → confirm view).
+
+    All previous parameters moved into a wizard for a streamlined UX
+    that mirrors the squad-event-discord-bot's create_event flow.
+    """
     settings = await check_guild_configured(interaction)
     if not settings:
         return
@@ -3594,114 +3608,269 @@ async def cmd_create_event(interaction: discord.Interaction,
         await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
         return
 
-    # Apply guild-configured defaults when params are omitted
-    if suggestion_start is None:
-        suggestion_start = settings.get("default_suggestion_start")
-    if suggestion_duration is None:
-        suggestion_duration = settings.get("default_suggestion_duration")
-    if allow_multiple_votes is None:
-        allow_multiple_votes = settings.get("default_allow_multiple_votes", False)
-
-    if voting_duration_hours is not None:
-        parsed_voting_hours = parse_voting_duration_to_hours(voting_duration_hours)
-        if parsed_voting_hours is None:
-            await interaction.response.send_message(
-                t("phase.invalid_duration", lang, value=voting_duration_hours),
-                ephemeral=True,
-            )
-            return
-        voting_duration_hours = parsed_voting_hours
-    else:
-        voting_duration_hours = int(settings.get("default_voting_duration_hours", 24))
-
-    # Parse suggestion start time. Accept absolute timestamps OR a duration
-    # offset from now (e.g. "1h" = start in one hour) — the latter is what
-    # gets stored by /config_create_suggestion.
-    sst = None
-    if suggestion_start:
-        for fmt in ("%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M", "%d.%m %H:%M"):
-            try:
-                sst = datetime.strptime(suggestion_start, fmt)
-                if fmt == "%d.%m %H:%M":
-                    sst = sst.replace(year=datetime.now().year)
-                break
-            except ValueError:
-                continue
-        if sst is None:
-            offset_seconds = parse_duration_to_seconds(suggestion_start)
-            if offset_seconds is not None:
-                sst = datetime.now() + timedelta(seconds=offset_seconds)
-
-    suggestion_duration_seconds = None
-    if suggestion_duration:
-        suggestion_duration_seconds = parse_duration_to_seconds(suggestion_duration)
-        if suggestion_duration_seconds is None:
-            await interaction.response.send_message(
-                t("phase.invalid_duration", lang, value=suggestion_duration),
-                ephemeral=True,
-            )
-            return
-
-    # Resolve which sources should be allowed for this event:
-    #   - Take all sources currently in the cache as the universe of options.
-    #   - Intersect with the guild's `allowed_sources` default, if set.
-    cache_sources = db.get_unique_sources()
-    guild_default = settings.get("allowed_sources") or []
-    if guild_default:
-        offered = [s for s in cache_sources if s in guild_default]
-    else:
-        offered = list(cache_sources)
-
+    # Resolve which sources will be offered. Same logic as before — the
+    # universe of cache sources, intersected with the guild's allowed list.
+    offered = _resolve_offered_sources(settings)
     if not offered:
         await interaction.response.send_message(t("cache.empty", lang), ephemeral=True)
         return
 
-    # If only one source is available, skip the picker entirely.
-    if len(offered) == 1:
-        await _finalize_event_creation(
-            interaction, settings, lang,
-            allowed_sources=offered,
+    await interaction.response.send_modal(EventScheduleModal(settings, lang, offered))
+
+
+def _resolve_offered_sources(settings: dict) -> list[str]:
+    """Sources to expose to event creators: cache ∩ guild default (or all if no default)."""
+    cache_sources = db.get_unique_sources()
+    guild_default = settings.get("allowed_sources") or []
+    if guild_default:
+        return [s for s in cache_sources if s in guild_default]
+    return list(cache_sources)
+
+
+class EventScheduleModal(ui.Modal):
+    """Wizard step 1: collect schedule + duration text inputs.
+
+    Modals only support TextInputs, so role/user gate, source picking,
+    and the multi-vote toggle live on the follow-up EventCreateConfirmView.
+    Suggestion start is strictly absolute (DD.MM.YYYY + HH:MM); the legacy
+    "+offset" syntax was removed. If the guild has a default offset, we
+    pre-fill the date/time fields with `now + offset` so admins can accept
+    or edit the resolved time instead of writing it from scratch.
+    """
+
+    def __init__(self, settings: dict, lang: str, offered_sources: list[str]):
+        super().__init__(title=t("event.wizard_title", lang), timeout=600)
+        self.settings = settings
+        self.lang = lang
+        self.offered_sources = list(offered_sources)
+
+        # Pre-fill date/time from guild default offset, if any.
+        prefill_date = ""
+        prefill_time = ""
+        default_offset = settings.get("default_suggestion_start") or ""
+        if default_offset:
+            offset_secs = parse_duration_to_seconds(default_offset)
+            if offset_secs is not None:
+                target = datetime.now() + timedelta(seconds=offset_secs)
+                prefill_date = target.strftime("%d.%m.%Y")
+                prefill_time = target.strftime("%H:%M")
+
+        sug_default = settings.get("default_suggestion_duration") or ""
+        vote_hours = int(settings.get("default_voting_duration_hours", 24) or 24)
+        vote_default = f"{vote_hours}h"
+
+        self.start_date = ui.TextInput(
+            label=t("event.wizard_start_date_label", lang),
+            placeholder="DD.MM.YYYY",
+            required=False, max_length=10, default=prefill_date,
+        )
+        self.start_time = ui.TextInput(
+            label=t("event.wizard_start_time_label", lang),
+            placeholder="HH:MM",
+            required=False, max_length=5, default=prefill_time,
+        )
+        self.sug_duration = ui.TextInput(
+            label=t("event.wizard_suggestion_duration_label", lang),
+            placeholder=DURATION_HINT,
+            required=False, max_length=10, default=sug_default,
+        )
+        self.vote_duration = ui.TextInput(
+            label=t("event.wizard_vote_duration_label", lang),
+            placeholder=DURATION_HINT,
+            required=True, max_length=10, default=vote_default,
+        )
+        self.add_item(self.start_date)
+        self.add_item(self.start_time)
+        self.add_item(self.sug_duration)
+        self.add_item(self.vote_duration)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lang = self.lang
+
+        # Strictly absolute: both date+time required together (or both empty).
+        d_raw = self.start_date.value.strip()
+        t_raw = self.start_time.value.strip()
+        sst: Optional[datetime] = None
+        if d_raw or t_raw:
+            if not (d_raw and t_raw):
+                await interaction.response.send_message(
+                    t("event.wizard_date_time_both_or_neither", lang), ephemeral=True)
+                return
+            try:
+                sst = datetime.strptime(f"{d_raw} {t_raw}", "%d.%m.%Y %H:%M")
+            except ValueError:
+                await interaction.response.send_message(
+                    t("event.wizard_invalid_date_time", lang, value=f"{d_raw} {t_raw}"),
+                    ephemeral=True)
+                return
+
+        suggestion_duration_seconds = None
+        if self.sug_duration.value.strip():
+            suggestion_duration_seconds = parse_duration_to_seconds(self.sug_duration.value)
+            if suggestion_duration_seconds is None:
+                await interaction.response.send_message(
+                    t("phase.invalid_duration", lang, value=self.sug_duration.value),
+                    ephemeral=True)
+                return
+
+        voting_duration_hours = parse_voting_duration_input(self.vote_duration.value)
+        if voting_duration_hours is None:
+            await interaction.response.send_message(
+                t("phase.invalid_duration", lang, value=self.vote_duration.value),
+                ephemeral=True)
+            return
+
+        view = EventCreateConfirmView(
+            lang=lang,
             sst=sst,
             suggestion_duration_seconds=suggestion_duration_seconds,
             voting_duration_hours=voting_duration_hours,
-            allow_multiple_votes=allow_multiple_votes,
-            ack_via_followup=False,
+            offered_sources=self.offered_sources,
+            allow_multiple_votes=bool(self.settings.get("default_allow_multiple_votes", False)),
         )
-        return
+        embed = discord.Embed(
+            title=t("event.wizard_confirm_title", lang),
+            description=t("event.wizard_confirm_desc", lang),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    # Multiple sources → ask the admin which to expose to users.
-    options = [
-        discord.SelectOption(label=s, value=s, default=True)
-        for s in offered[:25]
-    ]
-    view = EventSourceSelectView(
-        options=options,
-        lang=lang,
-        sst=sst,
-        suggestion_duration_seconds=suggestion_duration_seconds,
-        voting_duration_hours=voting_duration_hours,
-        allow_multiple_votes=allow_multiple_votes,
-    )
-    embed = discord.Embed(
-        title=t("event.select_sources_title", lang),
-        description=t("event.select_sources_desc", lang),
-        color=discord.Color.blurple(),
-    )
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class EventCreateConfirmView(ui.View):
+    """Wizard step 2: gate selection, source picker, multi-vote toggle, Confirm.
+
+    The schedule fields collected by EventScheduleModal are stashed on
+    this view; the admin uses the visual selectors here for the things
+    a modal can't host (Role/User pickers, multi-selects, toggles).
+    """
+
+    def __init__(self, lang, sst, suggestion_duration_seconds, voting_duration_hours,
+                 offered_sources, allow_multiple_votes):
+        super().__init__(timeout=300)
+        self.lang = lang
+        self.sst = sst
+        self.suggestion_duration_seconds = suggestion_duration_seconds
+        self.voting_duration_hours = voting_duration_hours
+        self.offered_sources = list(offered_sources)
+        self.allow_multiple_votes = bool(allow_multiple_votes)
+        self.selected_role_ids: list[int] = []
+        self.selected_user_ids: list[int] = []
+        self.selected_sources: list[str] = list(offered_sources)
+
+        # Row 0 — gate (mentionable: roles + members in one picker; optional)
+        self.gate_select = ui.MentionableSelect(
+            placeholder=t("event.wizard_gate_placeholder", lang),
+            min_values=0,
+            max_values=10,
+            row=0,
+        )
+        self.gate_select.callback = self._gate_changed
+        self.add_item(self.gate_select)
+
+        # Row 1 — source select, only when there's a real choice
+        self.source_select: Optional[ui.Select] = None
+        if len(offered_sources) > 1:
+            options = [
+                discord.SelectOption(label=s, value=s, default=True)
+                for s in offered_sources[:25]
+            ]
+            self.source_select = ui.Select(
+                placeholder=t("event.select_sources_placeholder", lang),
+                options=options,
+                min_values=1,
+                max_values=len(options),
+                row=1,
+            )
+            self.source_select.callback = self._sources_changed
+            self.add_item(self.source_select)
+
+        # Row 2 — multi-vote toggle + Confirm
+        self.multi_button = ui.Button(
+            label=self._multi_label(),
+            style=self._multi_style(),
+            row=2,
+        )
+        self.multi_button.callback = self._multi_toggled
+        self.add_item(self.multi_button)
+
+        self.confirm_button = ui.Button(
+            label=t("button.confirm_selection", lang),
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            row=2,
+        )
+        self.confirm_button.callback = self._confirm
+        self.add_item(self.confirm_button)
+
+    def _multi_label(self) -> str:
+        key = "event.wizard_multi_on" if self.allow_multiple_votes else "event.wizard_multi_off"
+        return t(key, self.lang)
+
+    def _multi_style(self) -> discord.ButtonStyle:
+        return discord.ButtonStyle.success if self.allow_multiple_votes else discord.ButtonStyle.secondary
+
+    async def _gate_changed(self, interaction: discord.Interaction):
+        roles: list[int] = []
+        users: list[int] = []
+        for v in self.gate_select.values:
+            if isinstance(v, discord.Role):
+                roles.append(v.id)
+            else:
+                users.append(v.id)
+        self.selected_role_ids = roles
+        self.selected_user_ids = users
+        await interaction.response.defer()
+
+    async def _sources_changed(self, interaction: discord.Interaction):
+        self.selected_sources = list(self.source_select.values)
+        await interaction.response.defer()
+
+    async def _multi_toggled(self, interaction: discord.Interaction):
+        self.allow_multiple_votes = not self.allow_multiple_votes
+        self.multi_button.label = self._multi_label()
+        self.multi_button.style = self._multi_style()
+        await interaction.response.edit_message(view=self)
+
+    async def _confirm(self, interaction: discord.Interaction):
+        if not self.selected_sources:
+            await interaction.response.send_message(
+                t("event.select_sources_required", self.lang), ephemeral=True)
+            return
+        settings = db.get_guild_settings(interaction.guild_id) or {}
+        await _finalize_event_creation(
+            interaction, settings, self.lang,
+            allowed_sources=self.selected_sources,
+            sst=self.sst,
+            suggestion_duration_seconds=self.suggestion_duration_seconds,
+            voting_duration_hours=self.voting_duration_hours,
+            allow_multiple_votes=self.allow_multiple_votes,
+            allowed_role_ids=self.selected_role_ids,
+            allowed_user_ids=self.selected_user_ids,
+            ack_via_followup=True,
+        )
 
 
 async def _finalize_event_creation(interaction: discord.Interaction, settings: dict, lang: str,
                                    *, allowed_sources: list[str],
                                    sst, suggestion_duration_seconds,
                                    voting_duration_hours, allow_multiple_votes,
+                                   allowed_role_ids: list[int],
+                                   allowed_user_ids: list[int],
                                    ack_via_followup: bool):
-    """Create the event row and post its embed. Used by both the no-picker path
-    (single source) and the EventSourceSelectView confirm callback."""
+    """Create the event row and post its embed.
+
+    Sole call site is the EventCreateConfirmView confirm button — the
+    wizard now always routes through that view, so there's no separate
+    "single-source fast path" anymore (the view just hides the source
+    select when there's nothing to pick).
+    """
     event_data = db.build_default_event(suggestion_start_time=sst, settings=settings)
     event_data["voting_duration_hours"] = max(1, min(MAX_VOTING_DURATION_HOURS, voting_duration_hours))
     event_data["suggestion_duration_seconds"] = suggestion_duration_seconds
     event_data["allow_multiple_votes"] = bool(allow_multiple_votes)
     event_data["allowed_sources"] = list(allowed_sources)
+    event_data["allowed_role_ids"] = list(allowed_role_ids)
+    event_data["allowed_user_ids"] = list(allowed_user_ids)
 
     # Create event in DB first to get its db_id; the EventActionView and the
     # follow-up update both need it baked into their button custom_ids.
@@ -3730,50 +3899,6 @@ async def _finalize_event_creation(interaction: discord.Interaction, settings: d
         f"(sources: {', '.join(allowed_sources)})",
         guild_id=interaction.guild_id,
     )
-
-
-class EventSourceSelectView(ui.View):
-    """Per-event source picker shown when /create_layer_suggestion is run with
-    more than one source available. Confirms with the admin's selection and
-    then proceeds to event creation."""
-
-    def __init__(self, options, lang, sst, suggestion_duration_seconds,
-                 voting_duration_hours, allow_multiple_votes):
-        super().__init__(timeout=180)
-        self.lang = lang
-        self.sst = sst
-        self.suggestion_duration_seconds = suggestion_duration_seconds
-        self.voting_duration_hours = voting_duration_hours
-        self.allow_multiple_votes = allow_multiple_votes
-        # Discord's Select.values is empty until the user interacts with the
-        # dropdown — even when options have default=True. Capture the defaults
-        # so a no-interaction click on Confirm uses what the admin saw selected.
-        self._default_values = [o.value for o in options if o.default]
-        self.select = ui.Select(
-            placeholder=t("event.select_sources_placeholder", lang),
-            options=options,
-            min_values=1,
-            max_values=len(options),
-        )
-        self.add_item(self.select)
-
-    @ui.button(label="Confirm", style=discord.ButtonStyle.success, row=1)
-    async def confirm(self, interaction: discord.Interaction, button: ui.Button):
-        chosen = list(self.select.values) if self.select.values else list(self._default_values)
-        if not chosen:
-            await interaction.response.send_message(
-                t("event.select_sources_required", self.lang), ephemeral=True)
-            return
-        settings = db.get_guild_settings(interaction.guild_id) or {}
-        await _finalize_event_creation(
-            interaction, settings, self.lang,
-            allowed_sources=chosen,
-            sst=self.sst,
-            suggestion_duration_seconds=self.suggestion_duration_seconds,
-            voting_duration_hours=self.voting_duration_hours,
-            allow_multiple_votes=self.allow_multiple_votes,
-            ack_via_followup=True,
-        )
 
 
 @bot.tree.command(name="open_suggestions", description="Manually open the suggestion phase")
@@ -3864,7 +3989,7 @@ async def cmd_close_suggestions(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="start_vote", description="Start voting with selected layers")
-@app_commands.describe(duration_hours="Vote length: bare number = hours, or '24h' / '2d' / '1w'. Max '2w' (14 days).")
+@app_commands.describe(duration_hours=f"Vote length ({DURATION_HINT}). Max 14 days. Bare number = minutes.")
 async def cmd_start_vote(interaction: discord.Interaction, duration_hours: str = None):
     settings = await check_guild_configured(interaction)
     if not settings:
@@ -3895,7 +4020,7 @@ async def cmd_start_vote(interaction: discord.Interaction, duration_hours: str =
         return
 
     if duration_hours:
-        parsed_hours = parse_voting_duration_to_hours(duration_hours)
+        parsed_hours = parse_voting_duration_input(duration_hours)
         if parsed_hours is None:
             await interaction.response.send_message(
                 t("phase.invalid_duration", lang, value=duration_hours), ephemeral=True)

@@ -275,12 +275,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Start Suggestion Phase",
     },
     "phase.duration_label": {
-        "de": "Dauer (z.B. 60, 2h, 1d) — leer = manuell",
-        "en": "Duration (e.g. 60, 2h, 1d) — empty = manual",
+        "de": "Dauer — leer = manuell",
+        "en": "Duration — empty = manual",
     },
     "phase.duration_placeholder": {
-        "de": "Leer lassen für manuelles Ende",
-        "en": "Leave blank for manual end",
+        "de": "60m, 2h, 1d, 1w (leer = manuell)",
+        "en": "60m, 2h, 1d, 1w (empty = manual)",
     },
     "phase.invalid_duration": {
         "de": "Ungültige Dauer: `{value}`. Erwartet z.B. `60`, `2h`, `1d`.",
@@ -491,8 +491,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Voting",
     },
     "thread.voting_welcome": {
-        "de": "🗳️ Berechtigte Mitglieder können hier abstimmen. Nachrichten sind deaktiviert.",
-        "en": "🗳️ Eligible members can vote here. Chatting is disabled.",
+        "de": "🗳️ Berechtigte Mitglieder können hier abstimmen.",
+        "en": "🗳️ Eligible members can vote here.",
     },
 
     # ── /set_event_roles & /clear_event_roles ─────────────────────────────
@@ -515,6 +515,56 @@ _STRINGS: dict[str, dict[str, str]] = {
     "roles.already_empty": {
         "de": "Die Allow-Liste ist bereits leer.",
         "en": "The allow-list is already empty.",
+    },
+
+    # ── Event creation wizard (Modal + Confirm view) ──────────────────────
+    "event.wizard_title": {
+        "de": "Neues Layer-Vote-Event",
+        "en": "New layer vote event",
+    },
+    "event.wizard_start_date_label": {
+        "de": "Start-Datum (DD.MM.YYYY) — leer = manuell",
+        "en": "Start date (DD.MM.YYYY) — empty = manual",
+    },
+    "event.wizard_start_time_label": {
+        "de": "Start-Uhrzeit (HH:MM) — leer = manuell",
+        "en": "Start time (HH:MM) — empty = manual",
+    },
+    "event.wizard_suggestion_duration_label": {
+        "de": "Vorschlagsphase-Dauer — leer = manuell",
+        "en": "Suggestion phase duration — empty = manual",
+    },
+    "event.wizard_vote_duration_label": {
+        "de": "Abstimmungs-Dauer (max. 14 Tage)",
+        "en": "Voting duration (max 14 days)",
+    },
+    "event.wizard_date_time_both_or_neither": {
+        "de": "Bitte Datum und Uhrzeit gemeinsam angeben oder beide leer lassen.",
+        "en": "Please provide both date and time, or leave both empty.",
+    },
+    "event.wizard_invalid_date_time": {
+        "de": "Ungültiges Datum/Uhrzeit: `{value}`. Format: `DD.MM.YYYY HH:MM`.",
+        "en": "Invalid date/time: `{value}`. Format: `DD.MM.YYYY HH:MM`.",
+    },
+    "event.wizard_confirm_title": {
+        "de": "Event-Konfiguration bestätigen",
+        "en": "Confirm event configuration",
+    },
+    "event.wizard_confirm_desc": {
+        "de": "Wähle Rolle/Nutzer, die teilnehmen dürfen (optional), die Layer-Quellen und ob mehrere Stimmen erlaubt sind. Dann **Bestätigen**.",
+        "en": "Pick the role/user allowed to participate (optional), the layer sources, and whether multiple votes are allowed. Then **Confirm**.",
+    },
+    "event.wizard_gate_placeholder": {
+        "de": "Rolle/Nutzer, die teilnehmen dürfen (optional)",
+        "en": "Role/user allowed to participate (optional)",
+    },
+    "event.wizard_multi_on": {
+        "de": "Mehrfachstimmen: AN",
+        "en": "Multiple votes: ON",
+    },
+    "event.wizard_multi_off": {
+        "de": "Mehrfachstimmen: AUS",
+        "en": "Multiple votes: OFF",
     },
 
     # ── Settings display ──────────────────────────────────────────────────
