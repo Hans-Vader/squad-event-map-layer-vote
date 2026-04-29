@@ -2498,6 +2498,29 @@ def _close_session(user_id: int) -> None:
     _active_edit_sessions.pop(user_id, None)
 
 
+async def _handle_edit_timeout(user_id: int) -> None:
+    """Inform the user we gave up waiting and disable the dialog.
+
+    Called from the on_timeout of any edit view. No-op if the session was
+    already closed (e.g. the user pressed Done before the timer fired).
+    """
+    session = _active_edit_sessions.pop(user_id, None)
+    if not session:
+        return
+    lang = session.get("lang", "en")
+    dm_msg = session.get("dm_message")
+    if dm_msg is None:
+        return
+    try:
+        await dm_msg.edit(view=None)
+    except discord.HTTPException:
+        pass
+    try:
+        await dm_msg.channel.send(t("edit.timeout", lang))
+    except discord.HTTPException:
+        pass
+
+
 async def _refresh_main_view(interaction: discord.Interaction, user_id: int,
                              db_id: int, guild_id: int, lang: str,
                              updated_label: Optional[str] = None,
@@ -2583,14 +2606,17 @@ class EditMainView(ui.View):
 
     async def _on_done(self, interaction: discord.Interaction):
         _close_session(self.user_id)
-        await interaction.response.edit_message(
-            embed=discord.Embed(description=t("edit.finished", self.lang),
-                                color=discord.Color.greyple()),
-            view=None,
-        )
+        try:
+            await interaction.response.defer()
+        except discord.InteractionResponded:
+            pass
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
 
     async def on_timeout(self):
-        _close_session(self.user_id)
+        await _handle_edit_timeout(self.user_id)
 
 
 async def _show_property_editor(interaction: discord.Interaction, user_id: int,
@@ -2695,6 +2721,9 @@ class EditListView(ui.View):
         await _refresh_main_view(interaction, self.user_id, self.db_id,
                                  self.guild_id, self.lang)
 
+    async def on_timeout(self):
+        await _handle_edit_timeout(self.user_id)
+
 
 class EditBoolView(ui.View):
     """Two-button toggle for bool properties."""
@@ -2741,6 +2770,9 @@ class EditBoolView(ui.View):
         await _refresh_main_view(interaction, self.user_id, self.db_id,
                                  self.guild_id, self.lang)
 
+    async def on_timeout(self):
+        await _handle_edit_timeout(self.user_id)
+
 
 class EditScalarView(ui.View):
     """Wrapper for int/duration properties — opens a Modal on click.
@@ -2780,6 +2812,9 @@ class EditScalarView(ui.View):
     async def _on_cancel(self, interaction: discord.Interaction):
         await _refresh_main_view(interaction, self.user_id, self.db_id,
                                  self.guild_id, self.lang)
+
+    async def on_timeout(self):
+        await _handle_edit_timeout(self.user_id)
 
 
 class EditScalarModal(ui.Modal):
