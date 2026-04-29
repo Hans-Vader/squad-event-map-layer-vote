@@ -3254,7 +3254,7 @@ _display_update_tasks: dict[int, asyncio.Task] = {}
 # Live vote-count refresh cadence. Short enough that the embed feels live
 # during a 24h vote; long enough to stay well clear of Discord's per-channel
 # message-edit rate limits even with multiple concurrent voting events.
-LIVE_VOTE_REFRESH_SECONDS = 120
+LIVE_VOTE_REFRESH_SECONDS = 60
 
 # db_id -> datetime of last live-vote embed refresh; throttles the periodic
 # refresh in check_events_loop so we don't burn API calls every loop tick.
