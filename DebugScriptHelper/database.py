@@ -694,6 +694,14 @@ def build_default_event(suggestion_start_time=None,
         # the admin at /create_layer_suggestion time (defaults to the guild's
         # allowed_sources setting).
         "allowed_sources": [],
+        # Per-event participation gate. Both empty = anyone can suggest/vote
+        # (current behavior). When non-empty, only matching members may use
+        # Suggest Layer or join the private voting thread.
+        "allowed_role_ids": [],
+        "allowed_user_ids": [],
+        # Set when /start_vote creates a private thread for a gated event
+        # (None for unrestricted events that vote in the parent channel).
+        "vote_thread_id": None,
         # Per-event snapshot of guild settings that influence the suggestion
         # flow. Edited via the Admin → Edit DM dialog without affecting other
         # events. Readers should call _event_settings(event, guild_settings)

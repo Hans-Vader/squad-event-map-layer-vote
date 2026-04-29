@@ -462,6 +462,60 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Auswahl bestätigen",
         "en": "Confirm Selection",
     },
+    "button.join_vote": {
+        "de": "Zur Abstimmung",
+        "en": "Join Voting",
+    },
+
+    # ── Role gate (per-event role/user allow-list) ────────────────────────
+    "gate.denied": {
+        "de": "Du bist nicht berechtigt, an diesem Event teilzunehmen.",
+        "en": "You are not eligible to participate in this event.",
+    },
+    "gate.no_thread": {
+        "de": "Dieses Event ist offen — die Abstimmung läuft direkt in diesem Kanal.",
+        "en": "This event is open — voting takes place directly in this channel.",
+    },
+    "gate.thread_missing": {
+        "de": "Der Abstimmungs-Thread wurde nicht gefunden.",
+        "en": "The voting thread could not be found.",
+    },
+    "gate.joined": {
+        "de": "Du wurdest zum Abstimmungs-Thread hinzugefügt: {thread}",
+        "en": "You've been added to the voting thread: {thread}",
+    },
+
+    # ── Voting thread (private thread created at /start_vote) ─────────────
+    "thread.voting_name": {
+        "de": "Abstimmung",
+        "en": "Voting",
+    },
+    "thread.voting_welcome": {
+        "de": "🗳️ Berechtigte Mitglieder können hier abstimmen. Nachrichten sind deaktiviert.",
+        "en": "🗳️ Eligible members can vote here. Chatting is disabled.",
+    },
+
+    # ── /set_event_roles & /clear_event_roles ─────────────────────────────
+    "roles.no_args": {
+        "de": "Gib mindestens eine Rolle oder einen Nutzer an.",
+        "en": "Please provide at least one role or user.",
+    },
+    "roles.added": {
+        "de": "Allow-Liste aktualisiert:\n{changes}",
+        "en": "Allow-list updated:\n{changes}",
+    },
+    "roles.no_changes": {
+        "de": "Keine Änderungen — die angegebenen Einträge sind bereits in der Allow-Liste.",
+        "en": "No changes — the entries you provided are already on the allow-list.",
+    },
+    "roles.cleared": {
+        "de": "Allow-Liste geleert. Das Event ist jetzt offen für alle.",
+        "en": "Allow-list cleared. The event is now open to everyone.",
+    },
+    "roles.already_empty": {
+        "de": "Die Allow-Liste ist bereits leer.",
+        "en": "The allow-list is already empty.",
+    },
 
     # ── Settings display ──────────────────────────────────────────────────
     "settings.title": {

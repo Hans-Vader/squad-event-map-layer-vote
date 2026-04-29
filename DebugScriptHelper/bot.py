@@ -25,6 +25,7 @@ from config import TOKEN, ADMIN_IDS, EVENT_CHECK_INTERVAL, EVENT_CHECK_INTERVAL_
 from i18n import t
 from utils import (
     has_organizer_role, is_guild_admin,
+    check_role_gate,
     format_layer_short, format_layer_poll_option, suggestion_matches,
     build_event_embed, build_settings_embed,
     set_log_channel, send_to_log_channel,
@@ -140,10 +141,11 @@ class LayerVoteBot(commands.Bot):
                 if not msg_id:
                     continue
                 lang = db.get_guild_language(record["guild_id"])
-                self.add_view(
-                    EventActionView(record["db_id"], lang),
-                    message_id=msg_id,
-                )
+                phase = record["event"].get("phase", "created")
+                view = _view_for_phase(record["db_id"], phase, lang)
+                if view is None:
+                    continue
+                self.add_view(view, message_id=msg_id)
         except Exception as e:
             logger.warning(f"Failed to re-attach event views on startup: {e}")
         await self.tree.sync()
@@ -721,6 +723,57 @@ class EventActionView(ui.View):
         await handle_admin_panel(interaction, self.db_id)
 
 
+class VotingPhaseView(ui.View):
+    """View attached to a gated event's embed during the voting phase.
+
+    Suggest Layer is gone (suggestion phase ended) and Info is gone
+    (suggestions are visible as poll options inside the thread). Replaced
+    by Join Voting, which runs the role gate and adds the user to the
+    private voting thread on success — also covers the late-joiner case
+    where someone gets the allowed role *after* the thread was created.
+    """
+
+    def __init__(self, db_id: int, lang: str = "en"):
+        super().__init__(timeout=None)
+        self.db_id = db_id
+
+        join = ui.Button(
+            label=t("button.join_vote", lang),
+            style=discord.ButtonStyle.success,
+            custom_id=f"event_action:join_vote:{db_id}",
+            emoji="🗳️",
+        )
+        join.callback = self._join
+        self.add_item(join)
+
+        admin = ui.Button(
+            label=t("button.admin", lang),
+            style=discord.ButtonStyle.danger,
+            custom_id=f"event_action:admin:{db_id}",
+            emoji="⚙️",
+        )
+        admin.callback = self._admin
+        self.add_item(admin)
+
+    async def _join(self, interaction: discord.Interaction):
+        await handle_join_vote(interaction, self.db_id)
+
+    async def _admin(self, interaction: discord.Interaction):
+        await handle_admin_panel(interaction, self.db_id)
+
+
+def _view_for_phase(db_id: int, phase: str, lang: str) -> Optional[ui.View]:
+    """Return the persistent View for an event in the given phase.
+
+    Returns None when no buttons should be attached (completed phase).
+    """
+    if phase == "completed":
+        return None
+    if phase == "voting":
+        return VotingPhaseView(db_id, lang)
+    return EventActionView(db_id, lang)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SUGGESTION FLOW — Sequential dropdowns in ephemeral messages
 # ═══════════════════════════════════════════════════════════════════════════
@@ -833,6 +886,12 @@ async def handle_suggest_start(interaction: discord.Interaction, db_id: int):
     event = record["event"]
     if event.get("phase") != "suggestions_open":
         await interaction.response.send_message(t("suggest.not_open", lang), ephemeral=True)
+        return
+
+    # Per-event role/user gate. Same allow-list controls both suggesting
+    # and voting — empty list = open.
+    if not check_role_gate(event, interaction.user):
+        await interaction.response.send_message(t("gate.denied", lang), ephemeral=True)
         return
 
     # Check max suggestions — read from per-event config first, falling back
@@ -1902,6 +1961,164 @@ class ConfirmVoteButton(ui.Button):
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# VOTING THREAD — private thread for role-gated events
+#
+# Discord native polls can't be filtered per-user — anyone who can see the
+# message can vote. For events with a non-empty allow-list, we sidestep that
+# by posting the poll inside a *private thread* and letting Discord enforce
+# membership at the platform level.
+#
+# Order on /start_vote (gated event):
+#   1. Create private thread off the event's channel
+#   2. Send a welcome message that mentions the allowed role(s) — Discord
+#      auto-invites members of mentioned roles to private threads (much
+#      faster than iterating add_user across a large role)
+#   3. Add explicit users from allowed_user_ids
+#   4. Post the poll inside the thread
+#   5. Lock the thread (members can still vote — voting is an interaction,
+#      not a message send — but they can't chat, only vote)
+#
+# Late joiners (someone gets the role after the thread was created) click
+# the "Join Voting" button on the public event embed; the role gate runs
+# again and they get added.
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _resolve_thread(guild: discord.Guild, thread_id: int) -> Optional[discord.Thread]:
+    """Best-effort lookup of a thread by id, falling back to fetch_channel
+    so archived private threads are still reachable."""
+    if not thread_id:
+        return None
+    thread = guild.get_thread(thread_id)
+    if thread is not None:
+        return thread
+    try:
+        fetched = await bot.fetch_channel(thread_id)
+        if isinstance(fetched, discord.Thread):
+            return fetched
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+    return None
+
+
+async def _resolve_poll_target(channel: discord.abc.Messageable, event: dict) -> discord.abc.Messageable:
+    """Return the messageable that holds this event's poll message.
+
+    Gated events post their poll into a private thread (event.vote_thread_id);
+    open events post directly in the parent channel. Falls back to `channel`
+    if the thread is unreachable so callers don't have to special-case errors.
+    """
+    thread_id = event.get("vote_thread_id")
+    if not thread_id:
+        return channel
+    guild = getattr(channel, "guild", None)
+    if guild is None:
+        return channel
+    thread = await _resolve_thread(guild, thread_id)
+    return thread or channel
+
+
+async def _create_voting_thread(channel: discord.TextChannel, event: dict,
+                                 lang: str) -> Optional[discord.Thread]:
+    """Create the private voting thread and pre-populate its members.
+
+    Returns None when the event has no allow-list (caller falls back to
+    posting the poll directly in `channel`). Errors during the optional
+    role-mention auto-invite are non-fatal — eligible users can always
+    use the Join Voting button to opt in afterwards.
+    """
+    role_ids = event.get("allowed_role_ids") or []
+    user_ids = event.get("allowed_user_ids") or []
+    if not role_ids and not user_ids:
+        return None
+
+    try:
+        thread = await channel.create_thread(
+            name=t("thread.voting_name", lang),
+            type=discord.ChannelType.private_thread,
+            invitable=False,  # only the bot/mods can add others
+            auto_archive_duration=10080,  # 7 days
+        )
+    except discord.HTTPException as e:
+        logger.error(f"Failed to create voting thread in #{channel.id}: {e}")
+        return None
+
+    # Welcome message + role pings → Discord auto-adds role members to the
+    # private thread. allowed_mentions is set so the pings actually fire.
+    parts = [t("thread.voting_welcome", lang)]
+    if role_ids:
+        parts.append(" ".join(f"<@&{rid}>" for rid in role_ids))
+    if user_ids:
+        parts.append(" ".join(f"<@{uid}>" for uid in user_ids))
+    try:
+        await thread.send(
+            "\n".join(parts),
+            allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+        )
+    except discord.HTTPException as e:
+        logger.warning(f"Failed to send welcome ping in voting thread {thread.id}: {e}")
+
+    # Belt-and-suspenders: explicit add_user for the user-id allow-list.
+    # (Role mention covers role members; explicit users may not be in any
+    # mentioned role.)
+    for uid in user_ids:
+        try:
+            user = await bot.fetch_user(int(uid))
+            await thread.add_user(user)
+        except (ValueError, discord.HTTPException) as e:
+            logger.warning(f"Could not add user {uid} to voting thread: {e}")
+
+    return thread
+
+
+async def handle_join_vote(interaction: discord.Interaction, db_id: int):
+    """Join Voting button — gate-check the user and add them to the thread.
+
+    Also handles the late-joiner case: someone who gets the allowed role
+    after the thread was created can opt in here without an organizer
+    having to add them manually.
+    """
+    settings = db.get_guild_settings(interaction.guild_id)
+    if not settings:
+        await interaction.response.send_message(
+            t("general.guild_not_configured", "en"), ephemeral=True)
+        return
+    lang = settings.get("language", "en")
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
+    if not record:
+        await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
+        return
+
+    event = record["event"]
+    if event.get("phase") != "voting":
+        await interaction.response.send_message(t("vote.not_in_voting_phase", lang), ephemeral=True)
+        return
+
+    if not check_role_gate(event, interaction.user):
+        await interaction.response.send_message(t("gate.denied", lang), ephemeral=True)
+        return
+
+    thread_id = event.get("vote_thread_id")
+    if not thread_id:
+        # Open event — poll lives directly in the parent channel; nothing to join.
+        await interaction.response.send_message(t("gate.no_thread", lang), ephemeral=True)
+        return
+
+    thread = await _resolve_thread(interaction.guild, thread_id)
+    if thread is None:
+        await interaction.response.send_message(t("gate.thread_missing", lang), ephemeral=True)
+        return
+
+    try:
+        await thread.add_user(interaction.user)
+    except discord.HTTPException as e:
+        logger.warning(f"Failed to add {interaction.user.id} to voting thread {thread_id}: {e}")
+
+    await interaction.response.send_message(
+        t("gate.joined", lang, thread=thread.mention), ephemeral=True)
+
+
 async def _start_poll(interaction: discord.Interaction, db_id: int,
                       selected_ids: list[str]):
     """Create a Discord native poll for the selected layers."""
@@ -1929,8 +2146,17 @@ async def _start_poll(interaction: discord.Interaction, db_id: int,
     for s in selected[:10]:
         poll.add_answer(text=format_layer_poll_option(s))
 
-    channel = interaction.channel
-    poll_message = await channel.send(poll=poll)
+    # Gated events post the poll inside a private thread so Discord enforces
+    # the allow-list. Open events keep the legacy in-channel behavior.
+    voting_thread = await _create_voting_thread(interaction.channel, event, lang)
+    target = voting_thread if voting_thread is not None else interaction.channel
+    poll_message = await target.send(poll=poll)
+
+    if voting_thread is not None:
+        try:
+            await voting_thread.edit(locked=True)
+        except discord.HTTPException as e:
+            logger.warning(f"Failed to lock voting thread {voting_thread.id}: {e}")
 
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
@@ -1938,6 +2164,8 @@ async def _start_poll(interaction: discord.Interaction, db_id: int,
         if record:
             event = record["event"]
             event["poll_message_id"] = poll_message.id
+            if voting_thread is not None:
+                event["vote_thread_id"] = voting_thread.id
             db.save_event(record["db_id"], event)
 
     await interaction.response.edit_message(
@@ -1990,17 +2218,28 @@ async def _auto_start_poll(db_id: int, selected_ids: list[str]) -> bool:
     for s in selected[:10]:
         poll.add_answer(text=format_layer_poll_option(s))
 
+    voting_thread = await _create_voting_thread(channel, event, lang)
+    target = voting_thread if voting_thread is not None else channel
+
     try:
-        poll_message = await channel.send(poll=poll)
+        poll_message = await target.send(poll=poll)
     except Exception as e:
         logger.error(f"Failed to send auto-poll: {e}")
         return False
+
+    if voting_thread is not None:
+        try:
+            await voting_thread.edit(locked=True)
+        except discord.HTTPException as e:
+            logger.warning(f"Failed to lock voting thread {voting_thread.id}: {e}")
 
     lock = _get_guild_lock(guild_id)
     async with lock:
         rec = db.get_active_event_unsafe(db_id)
         if rec:
             rec["event"]["poll_message_id"] = poll_message.id
+            if voting_thread is not None:
+                rec["event"]["vote_thread_id"] = voting_thread.id
             db.save_event(rec["db_id"], rec["event"])
 
     await _update_event_embed(db_id)
@@ -2064,8 +2303,10 @@ async def _resolve_poll_winner(channel: discord.TextChannel, event: dict) -> Opt
     if not poll_msg_id:
         return None
 
+    target = await _resolve_poll_target(channel, event)
+
     try:
-        message = await channel.fetch_message(poll_msg_id)
+        message = await target.fetch_message(poll_msg_id)
         if not message.poll:
             return None
 
@@ -2151,12 +2392,21 @@ async def _do_delete_event(interaction: discord.Interaction, db_id: int):
             except discord.NotFound:
                 pass
 
-        # Delete poll message and its result message if they exist
+        # Delete poll message and its result message if they exist. The
+        # poll lives in the private voting thread when the event was gated;
+        # otherwise it's directly in the parent channel.
         poll_msg_id = event.get("poll_message_id")
+        thread_id = event.get("vote_thread_id")
+        poll_target = interaction.channel
+        if thread_id:
+            resolved_thread = await _resolve_thread(interaction.guild, thread_id)
+            if resolved_thread is not None:
+                poll_target = resolved_thread
+
         if poll_msg_id:
             # Try to delete the Discord-generated poll result message first
             try:
-                async for msg in interaction.channel.history(
+                async for msg in poll_target.history(
                     after=discord.Object(id=poll_msg_id), limit=15
                 ):
                     if msg.type.value == 46:  # MessageType.poll_result
@@ -2167,10 +2417,19 @@ async def _do_delete_event(interaction: discord.Interaction, db_id: int):
 
             # Delete the poll message itself
             try:
-                msg = await interaction.channel.fetch_message(poll_msg_id)
+                msg = await poll_target.fetch_message(poll_msg_id)
                 await msg.delete()
             except discord.NotFound:
                 pass
+
+        # Tear down the private voting thread, if any.
+        if thread_id:
+            thread = await _resolve_thread(interaction.guild, thread_id)
+            if thread is not None:
+                try:
+                    await thread.delete()
+                except discord.HTTPException as e:
+                    logger.warning(f"Failed to delete voting thread {thread_id}: {e}")
 
         db.delete_event(record["db_id"])
 
@@ -3032,10 +3291,8 @@ async def _do_update_embed(db_id: int):
 
         lang = settings.get("language", "en")
         phase = event.get("phase", "created")
-        if phase == "completed":
-            await message.edit(embed=embed, view=None)
-        else:
-            await message.edit(embed=embed, view=EventActionView(db_id, lang))
+        view = _view_for_phase(db_id, phase, lang)
+        await message.edit(embed=embed, view=view)
     except discord.NotFound:
         logger.warning(f"Event message {msg_id} not found in {channel_id}")
     except Exception as e:
@@ -3703,6 +3960,108 @@ async def cmd_delete_event(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(
+    name="set_event_roles",
+    description="Restrict suggesting + voting to specific roles/users for the event in this channel",
+)
+@app_commands.describe(
+    role="Role allowed to participate (suggest + vote). Can be combined with user.",
+    user="User allowed to participate (suggest + vote). Can be combined with role.",
+)
+async def cmd_set_event_roles(interaction: discord.Interaction,
+                              role: discord.Role = None,
+                              user: discord.Member = None):
+    settings = await check_guild_configured(interaction)
+    if not settings:
+        return
+    if not await check_organizer(interaction, settings):
+        return
+
+    lang = settings.get("language", "en")
+
+    if role is None and user is None:
+        await interaction.response.send_message(t("roles.no_args", lang), ephemeral=True)
+        return
+
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
+    changes: list[str] = []
+    lock = _get_guild_lock(interaction.guild_id)
+    async with lock:
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
+        if not record:
+            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
+            return
+        event = record["event"]
+        role_ids = list(event.get("allowed_role_ids") or [])
+        user_ids = list(event.get("allowed_user_ids") or [])
+
+        if role is not None and role.id not in role_ids:
+            role_ids.append(role.id)
+            changes.append(f"+ role {role.mention}")
+        if user is not None and user.id not in user_ids:
+            user_ids.append(user.id)
+            changes.append(f"+ user {user.mention}")
+
+        if not changes:
+            await interaction.response.send_message(t("roles.no_changes", lang), ephemeral=True)
+            return
+
+        event["allowed_role_ids"] = role_ids
+        event["allowed_user_ids"] = user_ids
+        db.save_event(record["db_id"], event)
+
+    await interaction.response.send_message(
+        t("roles.added", lang, changes="\n".join(changes)),
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    await send_to_log_channel(
+        f"Allow-list updated by {interaction.user.display_name}: {', '.join(changes)}",
+        guild_id=interaction.guild_id,
+    )
+
+
+@bot.tree.command(
+    name="clear_event_roles",
+    description="Clear the role/user allow-list (event becomes open to everyone)",
+)
+async def cmd_clear_event_roles(interaction: discord.Interaction):
+    settings = await check_guild_configured(interaction)
+    if not settings:
+        return
+    if not await check_organizer(interaction, settings):
+        return
+
+    lang = settings.get("language", "en")
+
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
+    lock = _get_guild_lock(interaction.guild_id)
+    async with lock:
+        record = db.get_event_by_db_id(interaction.guild_id, db_id)
+        if not record:
+            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
+            return
+        event = record["event"]
+        if not (event.get("allowed_role_ids") or event.get("allowed_user_ids")):
+            await interaction.response.send_message(t("roles.already_empty", lang), ephemeral=True)
+            return
+        event["allowed_role_ids"] = []
+        event["allowed_user_ids"] = []
+        db.save_event(record["db_id"], event)
+
+    await interaction.response.send_message(t("roles.cleared", lang), ephemeral=True)
+    await send_to_log_channel(
+        f"Event allow-list cleared by {interaction.user.display_name}",
+        guild_id=interaction.guild_id,
+    )
+
+
 @bot.tree.command(name="select_for_vote", description="Select layers for voting")
 async def cmd_select_for_vote(interaction: discord.Interaction):
     settings = await check_guild_configured(interaction)
@@ -4112,7 +4471,8 @@ async def check_events_loop():
                             if guild:
                                 channel = guild.get_channel(channel_id)
                                 if channel:
-                                    message = await channel.fetch_message(poll_msg_id)
+                                    target = await _resolve_poll_target(channel, event)
+                                    message = await target.fetch_message(poll_msg_id)
                                     if message.poll and message.poll.is_finalised():
                                         lock = _get_guild_lock(guild_id)
                                         async with lock:

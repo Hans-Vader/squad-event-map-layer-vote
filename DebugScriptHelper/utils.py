@@ -102,6 +102,31 @@ def is_guild_admin(user) -> bool:
     return False
 
 
+def check_role_gate(event: dict, user) -> bool:
+    """Check if a user is allowed to participate in a gated event.
+
+    The event's `allowed_role_ids` and `allowed_user_ids` form the allow-list.
+    Both empty = no gate (anyone allowed). Bot-level admins always pass so
+    operators can test restricted events without being on the allow-list.
+    Organizers do NOT auto-bypass: the gate is about participation, not
+    moderation, and an organizer running the event isn't automatically on
+    the team that's supposed to vote.
+    """
+    if hasattr(user, "id") and str(user.id) in ADMIN_IDS:
+        return True
+    role_ids = event.get("allowed_role_ids") or []
+    user_ids = event.get("allowed_user_ids") or []
+    if not role_ids and not user_ids:
+        return True
+    if hasattr(user, "id") and str(user.id) in [str(uid) for uid in user_ids]:
+        return True
+    if hasattr(user, "roles"):
+        user_role_ids = {r.id for r in user.roles}
+        if any(rid in user_role_ids for rid in role_ids):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Layer formatting
 # ---------------------------------------------------------------------------
