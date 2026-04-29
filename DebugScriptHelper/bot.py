@@ -2469,6 +2469,7 @@ async def admin_edit_event(interaction: discord.Interaction, db_id: int):
         "guild_id": interaction.guild_id,
         "lang": lang,
         "dm_message": None,
+        "active_view": None,
     }
     _active_edit_sessions[user.id] = session
 
@@ -2484,6 +2485,7 @@ async def admin_edit_event(interaction: discord.Interaction, db_id: int):
         )
         return
     session["dm_message"] = dm_msg
+    session["active_view"] = view
 
     await interaction.response.edit_message(
         embed=discord.Embed(
@@ -2498,15 +2500,29 @@ def _close_session(user_id: int) -> None:
     _active_edit_sessions.pop(user_id, None)
 
 
-async def _handle_edit_timeout(user_id: int) -> None:
+def _set_active_view(user_id: int, view: ui.View) -> None:
+    """Mark `view` as the currently displayed dialog view for this session.
+
+    Used by _handle_edit_timeout to ignore stale on_timeout callbacks from
+    views the user has already navigated away from.
+    """
+    session = _active_edit_sessions.get(user_id)
+    if session is not None:
+        session["active_view"] = view
+
+
+async def _handle_edit_timeout(view: ui.View, user_id: int) -> None:
     """Inform the user we gave up waiting and disable the dialog.
 
     Called from the on_timeout of any edit view. No-op if the session was
-    already closed (e.g. the user pressed Done before the timer fired).
+    already closed (e.g. the user pressed Done before the timer fired) or
+    if `view` is a stale view the user has already navigated away from —
+    each navigation creates a fresh view whose timer supersedes the old one.
     """
-    session = _active_edit_sessions.pop(user_id, None)
-    if not session:
+    session = _active_edit_sessions.get(user_id)
+    if not session or session.get("active_view") is not view:
         return
+    _active_edit_sessions.pop(user_id, None)
     lang = session.get("lang", "en")
     dm_msg = session.get("dm_message")
     if dm_msg is None:
@@ -2549,6 +2565,7 @@ async def _refresh_main_view(interaction: discord.Interaction, user_id: int,
 
     embed = _build_edit_main_embed(record["event"], lang, updated_label=updated_label)
     view = EditMainView(user_id, db_id, guild_id, lang)
+    _set_active_view(user_id, view)
 
     if via_modal:
         # Acknowledge the modal silently, then edit the stored DM message.
@@ -2616,7 +2633,7 @@ class EditMainView(ui.View):
             pass
 
     async def on_timeout(self):
-        await _handle_edit_timeout(self.user_id)
+        await _handle_edit_timeout(self, self.user_id)
 
 
 async def _show_property_editor(interaction: discord.Interaction, user_id: int,
@@ -2639,9 +2656,11 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
     if prop["kind"] == "list":
         choices = prop["source"]() if prop.get("source") else []
         if not choices:
+            fallback_view = EditMainView(user_id, db_id, guild_id, lang)
+            _set_active_view(user_id, fallback_view)
             await interaction.response.edit_message(
                 embed=discord.Embed(description=t("cache.empty", lang), color=discord.Color.orange()),
-                view=EditMainView(user_id, db_id, guild_id, lang),
+                view=fallback_view,
             )
             return
         current_set = set(current or [])
@@ -2655,6 +2674,7 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
             for c in choices[:25]
         ]
         view = EditListView(user_id, db_id, guild_id, lang, prop, options)
+        _set_active_view(user_id, view)
         embed = discord.Embed(
             title=label,
             description=t("edit.list_prompt", lang),
@@ -2664,6 +2684,7 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
 
     elif prop["kind"] == "bool":
         view = EditBoolView(user_id, db_id, guild_id, lang, prop, bool(current))
+        _set_active_view(user_id, view)
         embed = discord.Embed(
             title=label,
             description=t("edit.bool_prompt", lang,
@@ -2674,6 +2695,7 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
 
     else:  # int / duration — both go through a Modal triggered by a button
         view = EditScalarView(user_id, db_id, guild_id, lang, prop)
+        _set_active_view(user_id, view)
         if prop["kind"] == "int":
             desc = t("edit.int_prompt", lang,
                      current=_format_property_value(current, "int"),
@@ -2722,7 +2744,7 @@ class EditListView(ui.View):
                                  self.guild_id, self.lang)
 
     async def on_timeout(self):
-        await _handle_edit_timeout(self.user_id)
+        await _handle_edit_timeout(self, self.user_id)
 
 
 class EditBoolView(ui.View):
@@ -2771,7 +2793,7 @@ class EditBoolView(ui.View):
                                  self.guild_id, self.lang)
 
     async def on_timeout(self):
-        await _handle_edit_timeout(self.user_id)
+        await _handle_edit_timeout(self, self.user_id)
 
 
 class EditScalarView(ui.View):
@@ -2814,7 +2836,7 @@ class EditScalarView(ui.View):
                                  self.guild_id, self.lang)
 
     async def on_timeout(self):
-        await _handle_edit_timeout(self.user_id)
+        await _handle_edit_timeout(self, self.user_id)
 
 
 class EditScalarModal(ui.Modal):
