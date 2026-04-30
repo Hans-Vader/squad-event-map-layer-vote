@@ -3803,58 +3803,6 @@ async def _finalize_event_creation(interaction: discord.Interaction, settings: d
     )
 
 
-@bot.tree.command(name="end_vote", description="End voting early and determine the winner")
-async def cmd_end_vote(interaction: discord.Interaction):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-
-    db_id = await _resolve_channel_event(interaction, lang)
-    if db_id is None:
-        return
-
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_db_id(interaction.guild_id, db_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
-
-        event = record["event"]
-        if event.get("phase") != "voting":
-            await interaction.response.send_message(t("vote.not_in_voting_phase", lang), ephemeral=True)
-            return
-
-        winner = await _resolve_poll_winner(interaction.channel, event)
-        event["phase"] = "completed"
-        event["winning_layer"] = winner
-        db.save_event(record["db_id"], event)
-
-        if winner:
-            db.save_voting_history(
-                interaction.guild_id,
-                interaction.channel_id,
-                event.get("suggestions", []),
-                winner,
-            )
-
-    if winner:
-        desc = f"✅ {t('vote.ended', lang)}\n{t('vote.winner', lang, layer=format_layer_short(winner))}"
-    else:
-        desc = f"✅ {t('vote.ended', lang)}\n{t('vote.no_winner', lang)}"
-
-    await interaction.response.send_message(desc, ephemeral=True)
-    await _update_event_embed(db_id)
-    await send_to_log_channel(
-        f"Voting ended. Winner: {format_layer_short(winner) if winner else 'None'}",
-        guild_id=interaction.guild_id,
-    )
-
-
 @bot.tree.command(name="delete_event", description="Delete the current event in this channel")
 async def cmd_delete_event(interaction: discord.Interaction):
     settings = await check_guild_configured(interaction)
