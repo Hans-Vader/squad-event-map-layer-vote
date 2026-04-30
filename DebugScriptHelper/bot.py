@@ -3431,15 +3431,22 @@ class ScopedBlacklistView(ui.View):
             select.callback = self._make_callback(visible)
             self.add_item(select)
 
-        # Each Select auto-saves on change, so this is a "back to overview"
-        # action, not a true cancel. Labelled "Fertig" so the affordance for
-        # finishing the step is obvious.
+        # Each Select auto-saves on change, so both buttons just navigate
+        # back to the main overview. Cancel and Fertig are kept separate so
+        # the user has a clear "I'm done" affordance distinct from "back".
         done = ui.Button(
             label=t("edit.done", lang),
             style=discord.ButtonStyle.success, emoji="✅",
         )
         done.callback = self._on_done
         self.add_item(done)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_done
+        self.add_item(cancel)
 
     def _make_callback(self, scope_items: list[str]):
         scope = set(scope_items)
