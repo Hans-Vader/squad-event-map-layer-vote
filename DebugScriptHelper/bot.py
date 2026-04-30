@@ -769,13 +769,36 @@ class VotingPhaseView(ui.View):
         await handle_admin_panel(interaction, self.db_id)
 
 
-def _view_for_phase(db_id: int, phase: str, lang: str) -> Optional[ui.View]:
-    """Return the persistent View for an event in the given phase.
+class CompletedPhaseView(ui.View):
+    """View attached to a completed event's embed.
 
-    Returns None when no buttons should be attached (completed phase).
+    Only the Admin button — vote ended, the user-facing actions are all
+    behind us. The button still routes to the standard admin panel so the
+    organizer can edit metadata or delete the event from the embed
+    without touching slash commands.
     """
+
+    def __init__(self, db_id: int, lang: str = "en"):
+        super().__init__(timeout=None)
+        self.db_id = db_id
+
+        admin = ui.Button(
+            label=t("button.admin", lang),
+            style=discord.ButtonStyle.danger,
+            custom_id=f"event_action:admin:{db_id}",
+            emoji="⚙️",
+        )
+        admin.callback = self._admin
+        self.add_item(admin)
+
+    async def _admin(self, interaction: discord.Interaction):
+        await handle_admin_panel(interaction, self.db_id)
+
+
+def _view_for_phase(db_id: int, phase: str, lang: str) -> Optional[ui.View]:
+    """Return the persistent View for an event in the given phase."""
     if phase == "completed":
-        return None
+        return CompletedPhaseView(db_id, lang)
     if phase == "voting":
         return VotingPhaseView(db_id, lang)
     return EventActionView(db_id, lang)
