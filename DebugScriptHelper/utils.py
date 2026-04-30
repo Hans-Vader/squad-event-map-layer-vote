@@ -280,6 +280,7 @@ _MAP_NAME_ABBREV = {
 
 _UNIT_ABBREV = {
     "LightInfantry": "LightInf",
+    "CombinedArms": "CombArms"
 }
 
 

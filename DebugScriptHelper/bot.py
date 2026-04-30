@@ -1656,9 +1656,10 @@ class AdminButton(ui.Button):
     async def callback(self, interaction: discord.Interaction):
         db_id = self.view.db_id
         if self.action == "open_suggestions":
-            settings = db.get_guild_settings(interaction.guild_id)
-            lang = settings.get("language", "en") if settings else "en"
-            await interaction.response.send_modal(OpenSuggestionsModal(lang, db_id))
+            # Open with whatever duration the wizard stored on the event.
+            # To override, edit the event's suggestion_duration_seconds via
+            # the Admin → Edit DM dialog before clicking Open.
+            await admin_open_suggestions(interaction, db_id)
         elif self.action == "close_suggestions":
             await admin_close_suggestions(interaction, db_id)
         elif self.action == "select_for_vote":
@@ -1705,7 +1706,13 @@ class ConfirmActionView(ui.View):
 
 async def admin_open_suggestions(interaction: discord.Interaction, db_id: int,
                                  auto_close_seconds: Optional[int] = None):
-    """Open the suggestion phase for a specific event."""
+    """Open the suggestion phase for a specific event.
+
+    `auto_close_seconds` is an explicit override. When None, fall back to
+    the value the wizard stored at event-creation time — so the Admin →
+    Open Suggestions button respects what the admin already chose, instead
+    of resetting it.
+    """
     lock = _get_guild_lock(interaction.guild_id)
     end_time = None
     async with lock:
@@ -1722,6 +1729,9 @@ async def admin_open_suggestions(interaction: discord.Interaction, db_id: int,
                 ephemeral=True,
             )
             return
+
+        if auto_close_seconds is None:
+            auto_close_seconds = event.get("suggestion_duration_seconds")
 
         event["phase"] = "suggestions_open"
         end_time = (datetime.now() + timedelta(seconds=auto_close_seconds)) if auto_close_seconds else None
@@ -1741,33 +1751,6 @@ async def admin_open_suggestions(interaction: discord.Interaction, db_id: int,
     )
     await _update_event_embed(db_id)
     await send_to_log_channel(ack_text, guild_id=interaction.guild_id)
-
-
-class OpenSuggestionsModal(ui.Modal):
-    """Prompts the organizer for an optional suggestion-phase duration."""
-
-    def __init__(self, lang: str, db_id: int):
-        super().__init__(title=t("phase.duration_modal_title", lang))
-        self.lang = lang
-        self.db_id = db_id
-        self.duration_input = ui.TextInput(
-            label=t("phase.duration_label", lang),
-            placeholder=t("phase.duration_placeholder", lang),
-            required=False,
-            max_length=20,
-        )
-        self.add_item(self.duration_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        raw = (self.duration_input.value or "").strip()
-        seconds = parse_duration_to_seconds(raw) if raw else None
-        if raw and seconds is None:
-            await interaction.response.send_message(
-                t("phase.invalid_duration", self.lang, value=raw),
-                ephemeral=True,
-            )
-            return
-        await admin_open_suggestions(interaction, self.db_id, auto_close_seconds=seconds)
 
 
 async def admin_close_suggestions(interaction: discord.Interaction, db_id: int):
@@ -3905,61 +3888,6 @@ async def _finalize_event_creation(interaction: discord.Interaction, settings: d
         f"(sources: {', '.join(allowed_sources)})",
         guild_id=interaction.guild_id,
     )
-
-
-@bot.tree.command(name="open_suggestions", description="Manually open the suggestion phase")
-@app_commands.describe(
-    duration="Optional — e.g. '60' (mins), '2h', '1d'. Empty = manual close.",
-)
-async def cmd_open_suggestions(interaction: discord.Interaction, duration: str = None):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-
-    seconds = None
-    if duration:
-        seconds = parse_duration_to_seconds(duration)
-        if seconds is None:
-            await interaction.response.send_message(
-                t("phase.invalid_duration", lang, value=duration), ephemeral=True)
-            return
-
-    db_id = await _resolve_channel_event(interaction, lang)
-    if db_id is None:
-        return
-
-    lock = _get_guild_lock(interaction.guild_id)
-    end_time = None
-    async with lock:
-        record = db.get_event_by_db_id(interaction.guild_id, db_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
-
-        event = record["event"]
-        if event.get("phase") not in ("created",):
-            await interaction.response.send_message(t("phase.already_open", lang), ephemeral=True)
-            return
-
-        event["phase"] = "suggestions_open"
-        end_time = (datetime.now() + timedelta(seconds=seconds)) if seconds else None
-        event["suggestion_end_time"] = end_time
-        event["suggestion_duration_seconds"] = seconds
-        db.save_event(record["db_id"], event)
-
-    if end_time:
-        ts = int(end_time.timestamp())
-        ack_text = t("phase.suggestions_opened_until", lang, ts=ts)
-    else:
-        ack_text = t("phase.suggestions_opened", lang)
-
-    await interaction.response.send_message(f"✅ {ack_text}", ephemeral=True)
-    await _update_event_embed(db_id)
-    await send_to_log_channel(ack_text, guild_id=interaction.guild_id)
 
 
 @bot.tree.command(name="close_suggestions", description="Close the suggestion phase")

@@ -270,18 +270,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Die Vorschlagsphase ist nicht geöffnet.",
         "en": "The suggestion phase is not open.",
     },
-    "phase.duration_modal_title": {
-        "de": "Vorschlagsphase starten",
-        "en": "Start Suggestion Phase",
-    },
-    "phase.duration_label": {
-        "de": "Dauer — leer = manuell",
-        "en": "Duration — empty = manual",
-    },
-    "phase.duration_placeholder": {
-        "de": "60m, 2h, 1d, 1w (leer = manuell)",
-        "en": "60m, 2h, 1d, 1w (empty = manual)",
-    },
     "phase.invalid_duration": {
         "de": "Ungültige Dauer: `{value}`. Erwartet z.B. `60`, `2h`, `1d`.",
         "en": "Invalid duration: `{value}`. Expected e.g. `60`, `2h`, `1d`.",
