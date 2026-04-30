@@ -2993,6 +2993,14 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
     label = t(prop["label_key"], lang)
 
     if prop["kind"] == "list":
+        # Maps and factions blacklists are scoped through the same source →
+        # category flow used by the suggest dialog, otherwise a single flat
+        # dropdown becomes unusable on sources with many maps/factions.
+        if prop["key"] in ("blacklisted_maps", "blacklisted_factions"):
+            await _show_scoped_blacklist_source_picker(
+                interaction, user_id, db_id, guild_id, lang, prop, event)
+            return
+
         choices = prop["source"]() if prop.get("source") else []
         if not choices:
             fallback_view = EditMainView(user_id, db_id, guild_id, lang)
@@ -3236,35 +3244,279 @@ class EditScalarModal(ui.Modal):
                           self.lang, self.prop, value, via_modal=True)
 
 
-async def _apply_edit(interaction: discord.Interaction, user_id: int,
-                      db_id: int, guild_id: int, lang: str,
-                      prop: dict, value, via_modal: bool = False) -> None:
-    """Persist an edit, refresh the public event embed, return to main view."""
+# ───────────────────────────────────────────────────────────────────────────
+# Scoped blacklist editors (blacklisted_maps, blacklisted_factions)
+#
+# A flat multi-select is unusable when a source has dozens of maps/factions.
+# Mirroring the suggest flow, the user first picks a source, then sees a
+# bucketed picker (Small/Medium/Large for maps, single list for factions).
+# Saves are scope-aware: only entries within the visible bucket(s) are
+# replaced, so blacklisted items from other sources/buckets stay intact.
+# ───────────────────────────────────────────────────────────────────────────
+
+async def _bounce_to_main(interaction: discord.Interaction, user_id: int,
+                          db_id: int, guild_id: int, lang: str,
+                          message: str) -> None:
+    """Show a brief notice and reattach the main edit view."""
+    fallback_view = EditMainView(user_id, db_id, guild_id, lang)
+    _set_active_view(user_id, fallback_view)
+    await interaction.response.edit_message(
+        embed=discord.Embed(description=message, color=discord.Color.orange()),
+        view=fallback_view,
+    )
+
+
+async def _show_scoped_blacklist_source_picker(
+        interaction: discord.Interaction, user_id: int, db_id: int,
+        guild_id: int, lang: str, prop: dict, event: dict) -> None:
+    """Step 1 of the scoped blacklist edit: pick a source.
+
+    Skips straight to the editor when only one source is available, matching
+    the suggest flow's behaviour.
+    """
+    settings = db.get_guild_settings(guild_id) or {}
+    sources = _resolve_event_sources(event, settings)
+
+    if not sources:
+        await _bounce_to_main(interaction, user_id, db_id, guild_id, lang,
+                              t("cache.empty", lang))
+        return
+
+    if len(sources) == 1:
+        await _show_scoped_blacklist_editor(
+            interaction, user_id, db_id, guild_id, lang, prop, sources[0])
+        return
+
+    view = ScopedBlacklistSourceView(user_id, db_id, guild_id, lang, prop, sources)
+    _set_active_view(user_id, view)
+    embed = discord.Embed(
+        title=t(prop["label_key"], lang),
+        description=t("suggest.select_source", lang),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.edit_message(embed=embed, view=view)
+
+
+async def _show_scoped_blacklist_editor(
+        interaction: discord.Interaction, user_id: int, db_id: int,
+        guild_id: int, lang: str, prop: dict, source: str) -> None:
+    """Step 2: render the bucketed multi-select picker for the chosen source.
+
+    Builds the per-Select buckets that each save will scope itself to:
+    Small/Medium/Large groups for maps (mirroring the suggest flow), a
+    single bucket for factions. Either way, the picker is a
+    `ScopedBlacklistView`.
+    """
+    record = db.get_event_by_db_id(guild_id, db_id)
+    if not record:
+        await _notify_event_gone(interaction, user_id, lang)
+        return
+    event = record["event"]
+    blacklist = _read_event_property(event, prop["key"], prop["target"]) or []
+    source_filter = [source] if source else None
+
+    if prop["key"] == "blacklisted_maps":
+        maps = db.get_unique_maps(allowed_sources=source_filter)
+        if not maps:
+            await _bounce_to_main(interaction, user_id, db_id, guild_id, lang,
+                                  t("cache.empty", lang))
+            return
+        sizes = db.get_map_sizes(allowed_sources=source_filter)
+        groups = _group_maps_by_size(maps, sizes)
+        buckets = [
+            (f"{t(_SIZE_BUCKET_KEYS[k], lang)} ({len(items)})", items)
+            for k, items in groups.items() if items
+        ]
+    else:  # blacklisted_factions
+        factions = db.get_unique_factions(allowed_sources=source_filter)
+        if not factions:
+            await _bounce_to_main(interaction, user_id, db_id, guild_id, lang,
+                                  t("cache.empty", lang))
+            return
+        buckets = [(t("edit.list_placeholder", lang), factions)]
+
+    view = ScopedBlacklistView(user_id, db_id, guild_id, lang, prop, source,
+                               buckets, blacklist)
+    _set_active_view(user_id, view)
+    desc = (f"**{t('suggest.source_label', lang)}:** {source}\n"
+            f"{t('edit.list_prompt', lang)}") if source else t("edit.list_prompt", lang)
+    embed = discord.Embed(
+        title=t(prop["label_key"], lang),
+        description=desc,
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.edit_message(embed=embed, view=view)
+
+
+class ScopedBlacklistSourceView(ui.View):
+    """Source picker for blacklisted_maps / blacklisted_factions edits."""
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 prop: dict, sources: list[str]):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+        self.prop = prop
+
+        options = [discord.SelectOption(label=s[:100], value=s) for s in sources[:25]]
+        select = ui.Select(
+            placeholder=t("suggest.select_source", lang),
+            options=options, min_values=1, max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        source = interaction.data["values"][0]
+        await _show_scoped_blacklist_editor(
+            interaction, self.user_id, self.db_id, self.guild_id, self.lang,
+            self.prop, source)
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await _refresh_main_view(interaction, self.user_id, self.db_id,
+                                 self.guild_id, self.lang)
+
+    async def on_timeout(self):
+        await _handle_edit_timeout(self, self.user_id)
+
+
+class ScopedBlacklistView(ui.View):
+    """Scoped multi-select editor for blacklisted_maps / blacklisted_factions.
+
+    `buckets` is a list of `(placeholder, items)` tuples — one Select per
+    non-empty bucket. Maps pass 1-3 size-grouped buckets; factions pass a
+    single bucket. Saves are scope-aware: only items in the touched Select's
+    bucket are replaced in the global blacklist, leaving entries from other
+    buckets/sources intact.
+    """
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 prop: dict, source: str,
+                 buckets: list, blacklist: list[str]):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+        self.prop = prop
+        self.source = source
+
+        bl_set = set(blacklist or [])
+        for placeholder, items in buckets:
+            if not items:
+                continue
+            visible = items[:25]
+            if len(items) > 25:
+                logger.warning(
+                    "scoped blacklist '%s' bucket %r in source '%s' has %d items; truncating to 25.",
+                    prop["key"], placeholder, source, len(items))
+            options = [
+                discord.SelectOption(label=i[:100], value=i, default=(i in bl_set))
+                for i in visible
+            ]
+            select = ui.Select(
+                placeholder=placeholder,
+                options=options,
+                min_values=0, max_values=len(options),
+            )
+            select.callback = self._make_callback(visible)
+            self.add_item(select)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    def _make_callback(self, scope_items: list[str]):
+        scope = set(scope_items)
+
+        async def cb(interaction: discord.Interaction):
+            selected = set(interaction.data.get("values", []))
+
+            def transform(current):
+                return sorted((set(current or []) - scope) | selected)
+
+            ok = await _persist_property_value(
+                self.guild_id, self.db_id, self.prop, transform)
+            if not ok:
+                await _notify_event_gone(interaction, self.user_id, self.lang)
+                return
+            await _show_scoped_blacklist_editor(
+                interaction, self.user_id, self.db_id, self.guild_id,
+                self.lang, self.prop, self.source)
+        return cb
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await _refresh_main_view(interaction, self.user_id, self.db_id,
+                                 self.guild_id, self.lang)
+
+    async def on_timeout(self):
+        await _handle_edit_timeout(self, self.user_id)
+
+
+async def _persist_property_value(guild_id: int, db_id: int, prop: dict,
+                                   value_or_transform) -> bool:
+    """Persist a property value under the guild lock, then refresh the embed.
+
+    `value_or_transform` may be a value, or a callable receiving the current
+    value and returning the new one — invoked inside the lock so the
+    read-modify-write is atomic against concurrent edits. Returns False when
+    the event has been deleted under us; the caller is responsible for
+    surfacing that to the user.
+    """
     lock = _get_guild_lock(guild_id)
     async with lock:
         record = db.get_event_by_db_id(guild_id, db_id)
         if not record:
-            _close_session(user_id)
-            if via_modal:
-                try:
-                    await interaction.response.send_message(
-                        t("event.no_event", lang), ephemeral=True)
-                except discord.InteractionResponded:
-                    pass
-            else:
-                await interaction.response.edit_message(
-                    embed=discord.Embed(description=t("event.no_event", lang),
-                                        color=discord.Color.red()),
-                    view=None,
-                )
-            return
+            return False
         event = record["event"]
+        if callable(value_or_transform):
+            current = _read_event_property(event, prop["key"], prop["target"])
+            value = value_or_transform(current)
+        else:
+            value = value_or_transform
         _write_event_property(event, prop["key"], prop["target"], value)
         db.save_event(record["db_id"], event)
-
-    # Refresh the in-channel event embed so users see the new config.
     await _update_event_embed(db_id)
+    return True
 
+
+async def _notify_event_gone(interaction: discord.Interaction, user_id: int,
+                              lang: str, *, via_modal: bool = False) -> None:
+    """Close the session and tell the user their event no longer exists."""
+    _close_session(user_id)
+    if via_modal:
+        try:
+            await interaction.response.send_message(
+                t("event.no_event", lang), ephemeral=True)
+        except discord.InteractionResponded:
+            pass
+    else:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang),
+                                color=discord.Color.red()),
+            view=None,
+        )
+
+
+async def _apply_edit(interaction: discord.Interaction, user_id: int,
+                      db_id: int, guild_id: int, lang: str,
+                      prop: dict, value, via_modal: bool = False) -> None:
+    """Persist an edit, refresh the public event embed, return to main view."""
+    if not await _persist_property_value(guild_id, db_id, prop, value):
+        await _notify_event_gone(interaction, user_id, lang, via_modal=via_modal)
+        return
     label = t(prop["label_key"], lang)
     await _refresh_main_view(interaction, user_id, db_id, guild_id, lang,
                              updated_label=label, via_modal=via_modal)
