@@ -2401,21 +2401,15 @@ async def _do_delete_event(interaction: discord.Interaction, db_id: int):
             except discord.NotFound:
                 pass
 
-        # Delete poll message and its result message if they exist. The
-        # poll lives in the private voting thread when the event was gated;
-        # otherwise it's directly in the parent channel.
+        # Clean up the poll only when it's directly in the parent channel.
+        # Gated events vote inside a private thread, which we leave intact
+        # as a permanent record of the vote — deleting just the poll there
+        # would leave an empty thread with only the welcome message.
         poll_msg_id = event.get("poll_message_id")
         thread_id = event.get("vote_thread_id")
-        poll_target = interaction.channel
-        if thread_id:
-            resolved_thread = await _resolve_thread(interaction.guild, thread_id)
-            if resolved_thread is not None:
-                poll_target = resolved_thread
-
-        if poll_msg_id:
-            # Try to delete the Discord-generated poll result message first
+        if poll_msg_id and not thread_id:
             try:
-                async for msg in poll_target.history(
+                async for msg in interaction.channel.history(
                     after=discord.Object(id=poll_msg_id), limit=15
                 ):
                     if msg.type.value == 46:  # MessageType.poll_result
@@ -2424,21 +2418,11 @@ async def _do_delete_event(interaction: discord.Interaction, db_id: int):
             except Exception:
                 pass
 
-            # Delete the poll message itself
             try:
-                msg = await poll_target.fetch_message(poll_msg_id)
+                msg = await interaction.channel.fetch_message(poll_msg_id)
                 await msg.delete()
             except discord.NotFound:
                 pass
-
-        # Tear down the private voting thread, if any.
-        if thread_id:
-            thread = await _resolve_thread(interaction.guild, thread_id)
-            if thread is not None:
-                try:
-                    await thread.delete()
-                except discord.HTTPException as e:
-                    logger.warning(f"Failed to delete voting thread {thread_id}: {e}")
 
         db.delete_event(record["db_id"])
 
