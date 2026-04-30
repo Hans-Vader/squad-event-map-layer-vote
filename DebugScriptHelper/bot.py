@@ -3431,12 +3431,15 @@ class ScopedBlacklistView(ui.View):
             select.callback = self._make_callback(visible)
             self.add_item(select)
 
-        cancel = ui.Button(
-            label=t("general.cancel", lang),
-            style=discord.ButtonStyle.secondary, emoji="↩️",
+        # Each Select auto-saves on change, so this is a "back to overview"
+        # action, not a true cancel. Labelled "Fertig" so the affordance for
+        # finishing the step is obvious.
+        done = ui.Button(
+            label=t("edit.done", lang),
+            style=discord.ButtonStyle.success, emoji="✅",
         )
-        cancel.callback = self._on_cancel
-        self.add_item(cancel)
+        done.callback = self._on_done
+        self.add_item(done)
 
     def _make_callback(self, scope_items: list[str]):
         scope = set(scope_items)
@@ -3457,7 +3460,7 @@ class ScopedBlacklistView(ui.View):
                 self.lang, self.prop, self.source)
         return cb
 
-    async def _on_cancel(self, interaction: discord.Interaction):
+    async def _on_done(self, interaction: discord.Interaction):
         await _refresh_main_view(interaction, self.user_id, self.db_id,
                                  self.guild_id, self.lang)
 
