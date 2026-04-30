@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
@@ -2646,8 +2647,15 @@ async def admin_do_remove_suggestion(interaction: discord.Interaction,
 # bool toggles, and scalar modals. Component interactions edit that message
 # in place; modal submits edit it via the stored Message reference.
 
-# user_id -> {db_id, guild_id, lang, dm_message}
+# user_id -> {db_id, guild_id, lang, dm_message, active_view, last_activity}
 _active_edit_sessions: dict[int, dict] = {}
+
+# Sessions older than this with no interaction are treated as stuck — the
+# view's on_timeout (600s) should have cleared them by now, so a longer gap
+# means something went wrong (bot disconnect, dropped on_timeout, etc.).
+# Recovering automatically prevents the user from being permanently locked
+# out by "Du hast bereits eine offene Bearbeitungssitzung".
+SESSION_STALE_AFTER_SECONDS = 660
 
 
 def _format_duration_seconds(seconds: int) -> str:
@@ -2757,12 +2765,20 @@ async def admin_edit_event(interaction: discord.Interaction, db_id: int):
     settings = db.get_guild_settings(interaction.guild_id) or {}
     lang = settings.get("language", "en")
 
-    if user.id in _active_edit_sessions:
-        await interaction.response.edit_message(
-            embed=discord.Embed(description=t("edit.session_active", lang), color=discord.Color.orange()),
-            view=None,
-        )
-        return
+    existing = _active_edit_sessions.get(user.id)
+    if existing is not None:
+        last = existing.get("last_activity", 0)
+        if time.monotonic() - last < SESSION_STALE_AFTER_SECONDS:
+            # Genuinely active — block double-edits.
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=t("edit.session_active", lang),
+                                    color=discord.Color.orange()),
+                view=None,
+            )
+            return
+        # Stuck session: the view's on_timeout never fired. Clean up and
+        # let the user start fresh.
+        await _force_close_stale_session(user.id)
 
     record = db.get_event_by_db_id(interaction.guild_id, db_id)
     if not record:
@@ -2788,6 +2804,7 @@ async def admin_edit_event(interaction: discord.Interaction, db_id: int):
         "lang": lang,
         "dm_message": None,
         "active_view": None,
+        "last_activity": time.monotonic(),
     }
     _active_edit_sessions[user.id] = session
 
@@ -2836,12 +2853,34 @@ def _event_message_url(guild_id: int, db_id: int) -> Optional[str]:
 def _set_active_view(user_id: int, view: ui.View) -> None:
     """Mark `view` as the currently displayed dialog view for this session.
 
-    Used by _handle_edit_timeout to ignore stale on_timeout callbacks from
-    views the user has already navigated away from.
+    Also refreshes `last_activity`, which `admin_edit_event` consults to
+    detect stuck sessions. _handle_edit_timeout consults `active_view` to
+    ignore stale on_timeout callbacks from views the user has already
+    navigated away from.
     """
     session = _active_edit_sessions.get(user_id)
     if session is not None:
         session["active_view"] = view
+        session["last_activity"] = time.monotonic()
+
+
+async def _force_close_stale_session(user_id: int) -> None:
+    """Tear down a stuck edit session and disable its DM dialog if any.
+
+    Called when `admin_edit_event` finds a leftover session that the view's
+    on_timeout never cleared. Best-effort: HTTP errors editing the old DM
+    are swallowed — the in-memory pop is the part that unblocks the user.
+    """
+    session = _active_edit_sessions.pop(user_id, None)
+    if not session:
+        return
+    dm_msg = session.get("dm_message")
+    if dm_msg is None:
+        return
+    try:
+        await dm_msg.edit(view=None)
+    except discord.HTTPException:
+        pass
 
 
 async def _handle_edit_timeout(view: ui.View, user_id: int) -> None:
@@ -3010,24 +3049,19 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
                 view=fallback_view,
             )
             return
+        visible = choices[:25]
         current_set = set(current or [])
         # An empty `allowed_sources` means "all sources allowed" — preselect
         # everything so the admin sees the effective state, mirroring the old
         # /config_layer_sources behaviour.
         if prop["key"] == "allowed_sources" and not current_set:
-            current_set = set(choices)
-        options = [
-            discord.SelectOption(label=c[:100], value=c, default=(c in current_set))
-            for c in choices[:25]
-        ]
-        view = EditListView(user_id, db_id, guild_id, lang, prop, options)
+            current_set = set(visible)
+        initial_selected = current_set & set(visible)
+
+        view = EditListView(user_id, db_id, guild_id, lang, prop, visible, initial_selected)
         _set_active_view(user_id, view)
-        embed = discord.Embed(
-            title=label,
-            description=t("edit.list_prompt", lang),
-            color=discord.Color.blurple(),
-        )
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.edit_message(
+            embed=_edit_list_embed(prop, lang), view=view)
 
     elif prop["kind"] == "bool":
         view = EditBoolView(user_id, db_id, guild_id, lang, prop, bool(current))
@@ -3054,25 +3088,52 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
         await interaction.response.edit_message(embed=embed, view=view)
 
 
+def _edit_list_embed(prop: dict, lang: str) -> discord.Embed:
+    return discord.Embed(
+        title=t(prop["label_key"], lang),
+        description=t("edit.list_prompt", lang),
+        color=discord.Color.blurple(),
+    )
+
+
 class EditListView(ui.View):
-    """Multi-select editor for list-typed properties."""
+    """Buffered multi-select editor for list-typed properties.
+
+    Selections accumulate in `self.selected`; nothing is written to the DB
+    until the user presses Fertig. Pressing Abbrechen discards the buffer and
+    the original value stays. Re-renders on each Select interaction so the
+    dropdown's checkmarks reflect the in-progress state when reopened.
+    """
 
     def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
-                 prop: dict, options: list[discord.SelectOption]):
+                 prop: dict, choices: list[str], selected: set):
         super().__init__(timeout=600)
         self.user_id = user_id
         self.db_id = db_id
         self.guild_id = guild_id
         self.lang = lang
         self.prop = prop
+        self.choices = choices  # already truncated to <=25 by caller
+        self.selected = set(selected)
 
+        options = [
+            discord.SelectOption(label=c[:100], value=c, default=(c in self.selected))
+            for c in choices
+        ]
         select = ui.Select(
             placeholder=t("edit.list_placeholder", lang),
             options=options,
-            min_values=0, max_values=len(options),
+            min_values=0, max_values=len(options) or 1,
         )
-        select.callback = self._on_save
+        select.callback = self._on_select
         self.add_item(select)
+
+        done = ui.Button(
+            label=t("edit.done", lang),
+            style=discord.ButtonStyle.success, emoji="✅",
+        )
+        done.callback = self._on_done
+        self.add_item(done)
 
         cancel = ui.Button(
             label=t("general.cancel", lang),
@@ -3081,10 +3142,27 @@ class EditListView(ui.View):
         cancel.callback = self._on_cancel
         self.add_item(cancel)
 
-    async def _on_save(self, interaction: discord.Interaction):
-        new_values = list(interaction.data.get("values", []))
+    async def _on_select(self, interaction: discord.Interaction):
+        self.selected = set(interaction.data.get("values", []))
+        new_view = EditListView(
+            self.user_id, self.db_id, self.guild_id, self.lang,
+            self.prop, self.choices, self.selected)
+        _set_active_view(self.user_id, new_view)
+        await interaction.response.edit_message(
+            embed=_edit_list_embed(self.prop, self.lang), view=new_view)
+
+    async def _on_done(self, interaction: discord.Interaction):
+        new_value: list = sorted(self.selected)
+        # `allowed_sources` uses [] as the canonical "all sources" form
+        # (resolved dynamically via _resolve_event_sources). If the user
+        # confirms with every visible source still selected, save [] so
+        # future cache changes still auto-include new sources rather than
+        # the event being frozen to the explicit list.
+        if (self.prop["key"] == "allowed_sources"
+                and self.selected == set(self.choices)):
+            new_value = []
         await _apply_edit(interaction, self.user_id, self.db_id, self.guild_id,
-                          self.lang, self.prop, new_values)
+                          self.lang, self.prop, new_value)
 
     async def _on_cancel(self, interaction: discord.Interaction):
         await _refresh_main_view(interaction, self.user_id, self.db_id,
