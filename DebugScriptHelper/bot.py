@@ -3297,15 +3297,25 @@ async def _show_scoped_blacklist_source_picker(
     await interaction.response.edit_message(embed=embed, view=view)
 
 
+def _scoped_blacklist_embed(prop: dict, source: str, lang: str) -> discord.Embed:
+    desc = (f"**{t('suggest.source_label', lang)}:** {source}\n{t('edit.list_prompt', lang)}"
+            if source else t("edit.list_prompt", lang))
+    return discord.Embed(
+        title=t(prop["label_key"], lang),
+        description=desc,
+        color=discord.Color.blurple(),
+    )
+
+
 async def _show_scoped_blacklist_editor(
         interaction: discord.Interaction, user_id: int, db_id: int,
         guild_id: int, lang: str, prop: dict, source: str) -> None:
-    """Step 2: render the bucketed multi-select picker for the chosen source.
+    """Fresh entry into the bucketed picker.
 
-    Builds the per-Select buckets that each save will scope itself to:
-    Small/Medium/Large groups for maps (mirroring the suggest flow), a
-    single bucket for factions. Either way, the picker is a
-    `ScopedBlacklistView`.
+    Builds the buckets from current DB state and snapshots the existing
+    blacklist into each bucket's `selected` set. The user's subsequent
+    Select interactions mutate that buffer in place; nothing is written to
+    the DB until they press Fertig.
     """
     record = db.get_event_by_db_id(guild_id, db_id)
     if not record:
@@ -3313,6 +3323,7 @@ async def _show_scoped_blacklist_editor(
         return
     event = record["event"]
     blacklist = _read_event_property(event, prop["key"], prop["target"]) or []
+    bl_set = set(blacklist)
     source_filter = [source] if source else None
 
     if prop["key"] == "blacklisted_maps":
@@ -3324,7 +3335,9 @@ async def _show_scoped_blacklist_editor(
         sizes = db.get_map_sizes(allowed_sources=source_filter)
         groups = _group_maps_by_size(maps, sizes)
         buckets = [
-            (f"{t(_SIZE_BUCKET_KEYS[k], lang)} ({len(items)})", items)
+            {"placeholder": f"{t(_SIZE_BUCKET_KEYS[k], lang)} ({len(items)})",
+             "items": items,
+             "selected": {m for m in items[:25] if m in bl_set}}
             for k, items in groups.items() if items
         ]
     else:  # blacklisted_factions
@@ -3333,19 +3346,16 @@ async def _show_scoped_blacklist_editor(
             await _bounce_to_main(interaction, user_id, db_id, guild_id, lang,
                                   t("cache.empty", lang))
             return
-        buckets = [(t("edit.list_placeholder", lang), factions)]
+        buckets = [{
+            "placeholder": t("edit.list_placeholder", lang),
+            "items": factions,
+            "selected": {f for f in factions[:25] if f in bl_set},
+        }]
 
-    view = ScopedBlacklistView(user_id, db_id, guild_id, lang, prop, source,
-                               buckets, blacklist)
+    view = ScopedBlacklistView(user_id, db_id, guild_id, lang, prop, source, buckets)
     _set_active_view(user_id, view)
-    desc = (f"**{t('suggest.source_label', lang)}:** {source}\n"
-            f"{t('edit.list_prompt', lang)}") if source else t("edit.list_prompt", lang)
-    embed = discord.Embed(
-        title=t(prop["label_key"], lang),
-        description=desc,
-        color=discord.Color.blurple(),
-    )
-    await interaction.response.edit_message(embed=embed, view=view)
+    await interaction.response.edit_message(
+        embed=_scoped_blacklist_embed(prop, source, lang), view=view)
 
 
 class ScopedBlacklistSourceView(ui.View):
@@ -3390,18 +3400,18 @@ class ScopedBlacklistSourceView(ui.View):
 
 
 class ScopedBlacklistView(ui.View):
-    """Scoped multi-select editor for blacklisted_maps / blacklisted_factions.
+    """Buffered multi-select editor for blacklisted_maps / blacklisted_factions.
 
-    `buckets` is a list of `(placeholder, items)` tuples — one Select per
-    non-empty bucket. Maps pass 1-3 size-grouped buckets; factions pass a
-    single bucket. Saves are scope-aware: only items in the touched Select's
-    bucket are replaced in the global blacklist, leaving entries from other
-    buckets/sources intact.
+    `buckets` is a list of `{placeholder, items, selected}` dicts — one Select
+    per bucket. Maps get 1-3 size-grouped buckets; factions get a single
+    bucket. The list is shared by reference across re-renders so each Select
+    interaction mutates `selected` in place and the next view sees the latest
+    state. Nothing is written to the DB until the user presses Fertig.
+    Pressing Abbrechen discards the buffer; the original blacklist stays.
     """
 
     def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
-                 prop: dict, source: str,
-                 buckets: list, blacklist: list[str]):
+                 prop: dict, source: str, buckets: list):
         super().__init__(timeout=600)
         self.user_id = user_id
         self.db_id = db_id
@@ -3409,31 +3419,30 @@ class ScopedBlacklistView(ui.View):
         self.lang = lang
         self.prop = prop
         self.source = source
+        self.buckets = buckets
 
-        bl_set = set(blacklist or [])
-        for placeholder, items in buckets:
+        for i, bucket in enumerate(buckets):
+            items = bucket["items"]
             if not items:
                 continue
             visible = items[:25]
             if len(items) > 25:
                 logger.warning(
                     "scoped blacklist '%s' bucket %r in source '%s' has %d items; truncating to 25.",
-                    prop["key"], placeholder, source, len(items))
+                    prop["key"], bucket["placeholder"], source, len(items))
+            sel = bucket["selected"]
             options = [
-                discord.SelectOption(label=i[:100], value=i, default=(i in bl_set))
-                for i in visible
+                discord.SelectOption(label=v[:100], value=v, default=(v in sel))
+                for v in visible
             ]
             select = ui.Select(
-                placeholder=placeholder,
+                placeholder=bucket["placeholder"],
                 options=options,
                 min_values=0, max_values=len(options),
             )
-            select.callback = self._make_callback(visible)
+            select.callback = self._make_callback(i)
             self.add_item(select)
 
-        # Each Select auto-saves on change, so both buttons just navigate
-        # back to the main overview. Cancel and Fertig are kept separate so
-        # the user has a clear "I'm done" affordance distinct from "back".
         done = ui.Button(
             label=t("edit.done", lang),
             style=discord.ButtonStyle.success, emoji="✅",
@@ -3445,29 +3454,53 @@ class ScopedBlacklistView(ui.View):
             label=t("general.cancel", lang),
             style=discord.ButtonStyle.secondary, emoji="↩️",
         )
-        cancel.callback = self._on_done
+        cancel.callback = self._on_cancel
         self.add_item(cancel)
 
-    def _make_callback(self, scope_items: list[str]):
-        scope = set(scope_items)
-
+    def _make_callback(self, bucket_index: int):
         async def cb(interaction: discord.Interaction):
-            selected = set(interaction.data.get("values", []))
+            # Buffer the selection for this bucket. The mutation propagates
+            # across re-renders because `self.buckets` is the same list
+            # object passed to the next ScopedBlacklistView instance below.
+            self.buckets[bucket_index]["selected"] = set(
+                interaction.data.get("values", []))
 
-            def transform(current):
-                return sorted((set(current or []) - scope) | selected)
-
-            ok = await _persist_property_value(
-                self.guild_id, self.db_id, self.prop, transform)
-            if not ok:
-                await _notify_event_gone(interaction, self.user_id, self.lang)
-                return
-            await _show_scoped_blacklist_editor(
-                interaction, self.user_id, self.db_id, self.guild_id,
-                self.lang, self.prop, self.source)
+            new_view = ScopedBlacklistView(
+                self.user_id, self.db_id, self.guild_id, self.lang,
+                self.prop, self.source, self.buckets)
+            _set_active_view(self.user_id, new_view)
+            await interaction.response.edit_message(
+                embed=_scoped_blacklist_embed(self.prop, self.source, self.lang),
+                view=new_view,
+            )
         return cb
 
     async def _on_done(self, interaction: discord.Interaction):
+        # Commit: replace the visible-scope slice of the blacklist with the
+        # buffered selection. Items outside the visible scope (other sources,
+        # other buckets, or anything past the 25-item Select cap) stay
+        # untouched. Runs inside the guild lock for atomicity.
+        scope: set = set()
+        selected: set = set()
+        for bucket in self.buckets:
+            scope.update(bucket["items"][:25])
+            selected.update(bucket["selected"])
+
+        def transform(current):
+            return sorted((set(current or []) - scope) | selected)
+
+        ok = await _persist_property_value(
+            self.guild_id, self.db_id, self.prop, transform)
+        if not ok:
+            await _notify_event_gone(interaction, self.user_id, self.lang)
+            return
+        label = t(self.prop["label_key"], self.lang)
+        await _refresh_main_view(interaction, self.user_id, self.db_id,
+                                 self.guild_id, self.lang, updated_label=label)
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        # Buffer is discarded simply by navigating away — it lives on this
+        # view and is not persisted anywhere else.
         await _refresh_main_view(interaction, self.user_id, self.db_id,
                                  self.guild_id, self.lang)
 
