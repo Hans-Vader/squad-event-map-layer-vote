@@ -634,6 +634,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Layer aus History entfernen",
         "en": "Remove Layer from History",
     },
+    "history.confirm_remove_title": {
+        "de": "History-Eintrag entfernen?",
+        "en": "Remove history entry?",
+    },
+    "history.confirm_remove_prompt": {
+        "de": "Möchtest du diesen History-Eintrag wirklich entfernen?\n{layer}",
+        "en": "Do you really want to remove this history entry?\n{layer}",
+    },
     "history.remove_prompt": {
         "de": "Wähle einen History-Eintrag zum Entfernen:",
         "en": "Select a history entry to remove:",
@@ -719,6 +727,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     "admin.remove_not_found": {
         "de": "Vorschlag nicht gefunden (möglicherweise bereits entfernt).",
         "en": "Suggestion not found (it may have already been removed).",
+    },
+    "admin.confirm_remove_title": {
+        "de": "Vorschlag entfernen?",
+        "en": "Remove suggestion?",
+    },
+    "admin.confirm_remove_prompt": {
+        "de": "Möchtest du den Vorschlag von **{user}** wirklich entfernen?\n{layer}",
+        "en": "Do you really want to remove **{user}**'s suggestion?\n{layer}",
     },
 
     # ── Event edit DM dialog ─────────────────────────────────────────────

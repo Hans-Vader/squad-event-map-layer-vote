@@ -2516,7 +2516,53 @@ class RemoveSuggestionSelect(ui.Select):
         self.lang = lang
 
     async def callback(self, interaction: discord.Interaction):
-        await admin_do_remove_suggestion(interaction, self.view.db_id, self.values[0])
+        await _confirm_admin_remove_suggestion(
+            interaction, self.view.db_id, self.values[0], self.lang)
+
+
+async def _confirm_admin_remove_suggestion(interaction: discord.Interaction,
+                                            db_id: int, suggestion_id: str,
+                                            lang: str) -> None:
+    """Two-step delete: show a confirmation embed, then route Confirm to the
+    actual removal. Cancel falls through to the existing ConfirmActionView's
+    "cancelled" message — admin reopens the picker via the Admin → Remove
+    button if they want to try again."""
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
+    if not record:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang),
+                                color=discord.Color.red()),
+            view=None,
+        )
+        return
+    suggestion = next(
+        (s for s in record["event"].get("suggestions", [])
+         if s.get("id") == suggestion_id),
+        None,
+    )
+    if suggestion is None:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("admin.remove_not_found", lang),
+                                color=discord.Color.orange()),
+            view=None,
+        )
+        return
+
+    embed = discord.Embed(
+        title=t("admin.confirm_remove_title", lang),
+        description=t("admin.confirm_remove_prompt", lang,
+                      user=suggestion.get("user_name", "?"),
+                      layer=format_layer_short(suggestion)),
+        color=discord.Color.orange(),
+    )
+
+    async def confirm_cb(inter: discord.Interaction, _db_id: int):
+        await admin_do_remove_suggestion(inter, _db_id, suggestion_id)
+
+    await interaction.response.edit_message(
+        embed=embed,
+        view=ConfirmActionView(lang, confirm_cb, db_id),
+    )
 
 
 async def admin_remove_suggestion(interaction: discord.Interaction, db_id: int):
@@ -4534,11 +4580,15 @@ class HistoryRemoveSourceView(ui.View):
 
 
 class HistoryRemoveBucketedView(ui.View):
-    """Multi-bucket Selects of history entries; picking one removes it."""
+    """Multi-bucket Selects of history entries. Picking one shows a
+    confirmation dialog before the actual delete fires."""
 
     def __init__(self, groups: dict, lang: str):
         super().__init__(timeout=120)
         self.lang = lang
+        # Keyed by str(entry_id) so the confirm step can format the layer
+        # without re-querying the DB.
+        self._entries_by_id: dict[str, dict] = {}
 
         for bucket_key, entries in groups.items():
             if not entries:
@@ -4546,6 +4596,7 @@ class HistoryRemoveBucketedView(ui.View):
             label = t(_SIZE_BUCKET_KEYS[bucket_key], lang)
             options = []
             for entry in entries[:25]:
+                self._entries_by_id[str(entry["id"])] = entry
                 winner = entry.get("winning_layer") or {}
                 opt_label = format_layer_poll_option(winner)
                 date = str(entry.get("completed_at", ""))[:16]
@@ -4569,8 +4620,9 @@ class HistoryRemoveBucketedView(ui.View):
         self.add_item(cancel)
 
     async def _on_pick(self, interaction: discord.Interaction):
-        await _remove_history_entry(
-            interaction, interaction.data["values"][0], self.lang)
+        entry_id_str = interaction.data["values"][0]
+        entry = self._entries_by_id.get(entry_id_str)
+        await _confirm_history_remove(interaction, entry_id_str, entry, self.lang)
 
     async def _on_cancel(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
@@ -4578,6 +4630,34 @@ class HistoryRemoveBucketedView(ui.View):
                                 color=discord.Color.greyple()),
             view=None,
         )
+
+
+async def _confirm_history_remove(interaction: discord.Interaction,
+                                   entry_id_str: str, entry: Optional[dict],
+                                   lang: str) -> None:
+    """Show a confirm dialog before deleting a history entry.
+
+    `entry` is the in-memory entry dict (used to render the layer in the
+    prompt). It can be None if lookup failed — we still confirm by ID,
+    but the prompt is less informative.
+    """
+    if entry is not None:
+        layer_str = format_layer_poll_option(entry.get("winning_layer") or {})
+    else:
+        layer_str = ""
+    embed = discord.Embed(
+        title=t("history.confirm_remove_title", lang),
+        description=t("history.confirm_remove_prompt", lang, layer=layer_str),
+        color=discord.Color.orange(),
+    )
+
+    async def confirm_cb(inter: discord.Interaction, _db_id: int):
+        await _remove_history_entry(inter, entry_id_str, lang)
+
+    await interaction.response.edit_message(
+        embed=embed,
+        view=ConfirmActionView(lang, confirm_cb),
+    )
 
 
 @bot.tree.command(name="history_remove",
