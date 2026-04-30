@@ -630,6 +630,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Layer zur History hinzugefügt.",
         "en": "Layer added to history.",
     },
+    "history.remove_title": {
+        "de": "Layer aus History entfernen",
+        "en": "Remove Layer from History",
+    },
     "history.remove_prompt": {
         "de": "Wähle einen History-Eintrag zum Entfernen:",
         "en": "Select a history entry to remove:",

@@ -4409,67 +4409,174 @@ async def cmd_history_add(interaction: discord.Interaction):
     state = SuggestState(interaction.guild_id, interaction.channel_id, flow="history_add")
     _suggest_sessions[interaction.user.id] = state
 
-    blacklisted_maps = settings.get("blacklisted_maps", [])
-    maps = db.get_unique_maps(excluded_maps=blacklisted_maps)
-    if not maps:
-        await interaction.response.send_message(
-            t("general.error", lang, error="No maps available"), ephemeral=True)
+    # Source picker first, mirroring the suggest flow. There's no event to
+    # resolve sources from, so the candidates are all known sources, capped
+    # by guild-level allowed_sources via _resolve_event_sources({}, ...).
+    sources = _resolve_event_sources({}, settings)
+    if len(sources) > 1:
+        options = [discord.SelectOption(label=s[:100], value=s) for s in sources[:25]]
+        view = SourceSelectView(options, lang)
+        embed = discord.Embed(
+            title=t("history.add_title", lang),
+            description=t("suggest.select_source", lang),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return
 
-    sizes = db.get_map_sizes()
-    view = _build_map_picker_view(maps, lang, sizes)
-    embed = discord.Embed(
-        title=t("history.add_title", lang),
-        description=t("suggest.select_map", lang),
-        color=discord.Color.blurple(),
-    )
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    # Single source (or no sources configured): skip the picker. The map
+    # step renders the size-bucketed picker via _build_map_picker_view and
+    # surfaces its own "no maps" error if applicable.
+    state.source = sources[0] if sources else ""
+    await _suggest_show_map_step(interaction, state, settings, lang, edit=False)
 
 
-class HistoryRemoveView(ui.View):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
-        super().__init__(timeout=120)
-        self.add_item(HistoryRemoveSelect(options, lang))
-
-
-class HistoryRemoveSelect(ui.Select):
-    def __init__(self, options: list[discord.SelectOption], lang: str):
-        super().__init__(
-            placeholder=t("history.remove_placeholder", lang),
-            options=options, min_values=1, max_values=1,
-        )
-        self.lang = lang
-
-    async def callback(self, interaction: discord.Interaction):
-        try:
-            entry_id = int(self.values[0])
-        except (TypeError, ValueError):
-            await interaction.response.edit_message(
-                embed=discord.Embed(description=t("general.error", self.lang, error="bad id"),
-                                    color=discord.Color.red()),
-                view=None,
-            )
-            return
-
-        removed = db.delete_voting_history_entry(entry_id)
-        if not removed:
-            await interaction.response.edit_message(
-                embed=discord.Embed(description=t("history.remove_not_found", self.lang),
-                                    color=discord.Color.red()),
-                view=None,
-            )
-            return
-
+async def _remove_history_entry(interaction: discord.Interaction,
+                                 entry_id_str: str, lang: str) -> None:
+    """Delete the history row identified by `entry_id_str` and show the result."""
+    try:
+        entry_id = int(entry_id_str)
+    except (TypeError, ValueError):
         await interaction.response.edit_message(
-            embed=discord.Embed(
-                description=f"✅ {t('history.removed', self.lang)}",
-                color=discord.Color.green(),
-            ),
+            embed=discord.Embed(description=t("general.error", lang, error="bad id"),
+                                color=discord.Color.red()),
             view=None,
         )
-        await send_to_log_channel(
-            f"History entry {entry_id} removed by {interaction.user.display_name}",
-            guild_id=interaction.guild_id,
+        return
+
+    removed = db.delete_voting_history_entry(entry_id)
+    if not removed:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("history.remove_not_found", lang),
+                                color=discord.Color.red()),
+            view=None,
+        )
+        return
+
+    await interaction.response.edit_message(
+        embed=discord.Embed(
+            description=f"✅ {t('history.removed', lang)}",
+            color=discord.Color.green(),
+        ),
+        view=None,
+    )
+    await send_to_log_channel(
+        f"History entry {entry_id} removed by {interaction.user.display_name}",
+        guild_id=interaction.guild_id,
+    )
+
+
+def _history_remove_bucketed(entries: list, lang: str) -> tuple:
+    """Build the size-bucketed pick-one view for the given history entries.
+
+    Returns (embed, view). Entries are grouped into Small/Medium/Large by
+    their winning layer's map size — the same buckets used by the suggest
+    and scoped-blacklist flows. Each non-empty bucket gets its own Select.
+    """
+    sizes = db.get_map_sizes()
+    groups: dict[str, list] = {key: [] for key, _ in _SIZE_BUCKETS}
+    for entry in entries:
+        winner = entry.get("winning_layer") or {}
+        groups[_bucket_for_size(sizes.get(winner.get("map_name", "")))].append(entry)
+
+    view = HistoryRemoveBucketedView(groups, lang)
+    embed = discord.Embed(
+        title=t("history.remove_title", lang),
+        description=t("history.remove_prompt", lang),
+        color=discord.Color.blurple(),
+    )
+    return embed, view
+
+
+class HistoryRemoveSourceView(ui.View):
+    """Source picker for /history_remove. Skipped when only one source is
+    represented in the recent history."""
+
+    def __init__(self, by_source: dict, lang: str):
+        super().__init__(timeout=120)
+        self.by_source = by_source
+        self.lang = lang
+
+        sources = sorted(by_source.keys())
+        options = [
+            discord.SelectOption(
+                label=f"{'—' if s == '<unknown>' else s} ({len(by_source[s])})"[:100],
+                value=s,
+            )
+            for s in sources[:25]
+        ]
+        select = ui.Select(
+            placeholder=t("suggest.select_source", lang),
+            options=options, min_values=1, max_values=1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        source = interaction.data["values"][0]
+        embed, view = _history_remove_bucketed(
+            self.by_source.get(source, []), self.lang)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("general.cancelled", self.lang),
+                                color=discord.Color.greyple()),
+            view=None,
+        )
+
+
+class HistoryRemoveBucketedView(ui.View):
+    """Multi-bucket Selects of history entries; picking one removes it."""
+
+    def __init__(self, groups: dict, lang: str):
+        super().__init__(timeout=120)
+        self.lang = lang
+
+        for bucket_key, entries in groups.items():
+            if not entries:
+                continue
+            label = t(_SIZE_BUCKET_KEYS[bucket_key], lang)
+            options = []
+            for entry in entries[:25]:
+                winner = entry.get("winning_layer") or {}
+                opt_label = format_layer_poll_option(winner)
+                date = str(entry.get("completed_at", ""))[:16]
+                options.append(discord.SelectOption(
+                    label=opt_label[:100],
+                    value=str(entry["id"]),
+                    description=date[:100] or None,
+                ))
+            select = ui.Select(
+                placeholder=f"{label} ({len(entries)})",
+                options=options, min_values=1, max_values=1,
+            )
+            select.callback = self._on_pick
+            self.add_item(select)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_pick(self, interaction: discord.Interaction):
+        await _remove_history_entry(
+            interaction, interaction.data["values"][0], self.lang)
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("general.cancelled", self.lang),
+                                color=discord.Color.greyple()),
+            view=None,
         )
 
 
@@ -4488,27 +4595,35 @@ async def cmd_history_remove(interaction: discord.Interaction):
         await interaction.response.send_message(t("history.empty", lang), ephemeral=True)
         return
 
-    options = []
+    # Group by source so we can show a source picker first when multiple
+    # sources are represented (mirroring /history_add and the suggest flow).
+    # Legacy entries without a `source` field land under a sentinel key —
+    # Discord's SelectOption.value doesn't accept the empty string.
+    by_source: dict[str, list] = {}
     for entry in history:
         winner = entry.get("winning_layer")
         if not winner:
             continue
-        label = format_layer_poll_option(winner)
-        date = str(entry.get("completed_at", ""))[:16]
-        options.append(discord.SelectOption(
-            label=label[:100],
-            value=str(entry["id"]),
-            description=date[:100] or None,
-        ))
+        by_source.setdefault(winner.get("source") or "<unknown>", []).append(entry)
 
-    if not options:
+    if not by_source:
         await interaction.response.send_message(t("history.empty", lang), ephemeral=True)
         return
 
-    view = HistoryRemoveView(options, lang)
-    await interaction.response.send_message(
-        t("history.remove_prompt", lang), view=view, ephemeral=True,
+    if len(by_source) == 1:
+        # Skip source picker — straight to the bucketed entry list.
+        entries = next(iter(by_source.values()))
+        embed, view = _history_remove_bucketed(entries, lang)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        return
+
+    view = HistoryRemoveSourceView(by_source, lang)
+    embed = discord.Embed(
+        title=t("history.remove_title", lang),
+        description=t("suggest.select_source", lang),
+        color=discord.Color.blurple(),
     )
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
