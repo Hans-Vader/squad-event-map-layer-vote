@@ -27,7 +27,7 @@ from utils import (
     has_organizer_role, is_guild_admin,
     check_role_gate,
     format_layer_short, format_layer_poll_option, suggestion_matches,
-    build_event_embed, build_settings_embed,
+    build_event_embed,
     set_log_channel, send_to_log_channel,
 )
 
@@ -3458,19 +3458,6 @@ async def cmd_set_log_channel(interaction: discord.Interaction, channel: discord
     lang = settings.get("language", "en")
     await interaction.response.send_message(
         t("setup.log_channel_updated", lang, channel=channel.mention), ephemeral=True)
-
-
-@bot.tree.command(name="settings", description="View current server settings")
-async def cmd_settings(interaction: discord.Interaction):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    layer_count = db.get_layer_cache_count()
-    embed = build_settings_embed(settings, interaction.guild, layer_count)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="sync", description="Force sync slash commands")
