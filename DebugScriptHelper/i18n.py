@@ -388,6 +388,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Abstimmung läuft",
         "en": "Voting in progress",
     },
+    "embed.status_voting_until": {
+        "de": "Abstimmung läuft bis <t:{ts}:f> (<t:{ts}:R>)",
+        "en": "Voting in progress until <t:{ts}:f> (<t:{ts}:R>)",
+    },
     "embed.status_completed": {
         "de": "Abgeschlossen",
         "en": "Completed",
