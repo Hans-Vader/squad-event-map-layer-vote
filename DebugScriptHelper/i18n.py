@@ -102,6 +102,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Rollen-Einstellungen aktualisiert ({type}).",
         "en": "Role settings updated ({type}).",
     },
+    "config.sources_prompt": {
+        "de": "Wähle die Layer-Quellen aus, die beim Erstellen von Events angeboten werden sollen ({count} verfügbar).",
+        "en": "Select which layer sources are offered when creating events ({count} available).",
+    },
+    "config.sources_placeholder": {
+        "de": "Layer-Quellen auswählen",
+        "en": "Select layer sources",
+    },
+    "config.sources_updated": {
+        "de": "Erlaubte Layer-Quellen aktualisiert: {sources}",
+        "en": "Allowed layer sources updated: {sources}",
+    },
 
     # ── Layer cache ───────────────────────────────────────────────────────
     "cache.refreshing": {
@@ -138,15 +150,55 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Kein aktives Event in diesem Kanal.",
         "en": "No active event in this channel.",
     },
+    "event.multiple_in_channel": {
+        "de": "Mehrere aktive Events in diesem Kanal — bitte den Admin-Button auf dem jeweiligen Event-Embed verwenden.",
+        "en": "Multiple active events in this channel — please use the Admin button on the specific event embed.",
+    },
+    "event.select_sources_title": {
+        "de": "Layer-Quellen auswählen",
+        "en": "Select layer sources",
+    },
+    "event.select_sources_desc": {
+        "de": "Wähle, welche Layer-Quellen die Nutzer für dieses Event vorschlagen dürfen, dann bestätige.",
+        "en": "Select which layer sources users may suggest from for this event, then confirm.",
+    },
+    "event.select_sources_placeholder": {
+        "de": "Quellen für dieses Event auswählen",
+        "en": "Select sources for this event",
+    },
+    "event.select_sources_required": {
+        "de": "Bitte wähle mindestens eine Layer-Quelle aus.",
+        "en": "Please select at least one layer source.",
+    },
 
     # ── Suggestions ───────────────────────────────────────────────────────
     "suggest.phase_title": {
         "de": "Layer-Vorschlag",
         "en": "Layer Suggestion",
     },
+    "suggest.select_source": {
+        "de": "Wähle eine Layer-Quelle.",
+        "en": "Select a layer source.",
+    },
+    "suggest.source_label": {
+        "de": "Quelle",
+        "en": "Source",
+    },
     "suggest.select_map": {
         "de": "Wähle eine Map aus.",
         "en": "Select a map.",
+    },
+    "suggest.size_small": {
+        "de": "Klein",
+        "en": "Small",
+    },
+    "suggest.size_medium": {
+        "de": "Mittel",
+        "en": "Medium",
+    },
+    "suggest.size_large": {
+        "de": "Groß",
+        "en": "Large",
     },
     "suggest.select_mode": {
         "de": "Wähle einen Spielmodus.",
@@ -217,18 +269,6 @@ _STRINGS: dict[str, dict[str, str]] = {
     "phase.not_open": {
         "de": "Die Vorschlagsphase ist nicht geöffnet.",
         "en": "The suggestion phase is not open.",
-    },
-    "phase.duration_modal_title": {
-        "de": "Vorschlagsphase starten",
-        "en": "Start Suggestion Phase",
-    },
-    "phase.duration_label": {
-        "de": "Dauer (z.B. 60, 2h, 1d) — leer = manuell",
-        "en": "Duration (e.g. 60, 2h, 1d) — empty = manual",
-    },
-    "phase.duration_placeholder": {
-        "de": "Leer lassen für manuelles Ende",
-        "en": "Leave blank for manual end",
     },
     "phase.invalid_duration": {
         "de": "Ungültige Dauer: `{value}`. Erwartet z.B. `60`, `2h`, `1d`.",
@@ -376,6 +416,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Klick auf die Karte --> 🗺 um SquadCalc zu öffnen",
         "en": "Click on the map --> 🗺 to open SquadCalc",
     },
+    "embed.footer_legend_supermod": {
+        "de": "SPM/SU = SuperMod | GoingDark = SuperMod Nacht",
+        "en": "SPM/SU = SuperMod | GoingDark = SuperMod Night",
+    },
 
     # ── Buttons ───────────────────────────────────────────────────────────
     "button.suggest": {
@@ -405,6 +449,102 @@ _STRINGS: dict[str, dict[str, str]] = {
     "button.confirm_selection": {
         "de": "Auswahl bestätigen",
         "en": "Confirm Selection",
+    },
+    "button.join_vote": {
+        "de": "Zur Abstimmung",
+        "en": "Join Voting",
+    },
+
+    # ── Role gate (per-event role/user allow-list) ────────────────────────
+    "gate.denied": {
+        "de": "Du bist nicht berechtigt, an diesem Event teilzunehmen.",
+        "en": "You are not eligible to participate in this event.",
+    },
+    "gate.no_thread": {
+        "de": "Dieses Event ist offen — die Abstimmung läuft direkt in diesem Kanal.",
+        "en": "This event is open — voting takes place directly in this channel.",
+    },
+    "gate.thread_missing": {
+        "de": "Der Abstimmungs-Thread wurde nicht gefunden.",
+        "en": "The voting thread could not be found.",
+    },
+    "gate.joined": {
+        "de": "Du wurdest zum Abstimmungs-Thread hinzugefügt: {thread}",
+        "en": "You've been added to the voting thread: {thread}",
+    },
+
+    # ── Voting thread (private thread created at /start_vote) ─────────────
+    "thread.voting_name": {
+        "de": "Abstimmung — {period}",
+        "en": "Voting — {period}",
+    },
+    "thread.voting_welcome": {
+        "de": "🗳️ Berechtigte Mitglieder können hier abstimmen.",
+        "en": "🗳️ Eligible members can vote here.",
+    },
+
+    # ── /set_event_roles & /clear_event_roles ─────────────────────────────
+    "roles.no_args": {
+        "de": "Gib mindestens eine Rolle oder einen Nutzer an.",
+        "en": "Please provide at least one role or user.",
+    },
+    "roles.added": {
+        "de": "Allow-Liste aktualisiert:\n{changes}",
+        "en": "Allow-list updated:\n{changes}",
+    },
+    "roles.no_changes": {
+        "de": "Keine Änderungen — die angegebenen Einträge sind bereits in der Allow-Liste.",
+        "en": "No changes — the entries you provided are already on the allow-list.",
+    },
+    "roles.cleared": {
+        "de": "Allow-Liste geleert. Das Event ist jetzt offen für alle.",
+        "en": "Allow-list cleared. The event is now open to everyone.",
+    },
+    "roles.already_empty": {
+        "de": "Die Allow-Liste ist bereits leer.",
+        "en": "The allow-list is already empty.",
+    },
+
+    # ── Event creation wizard (Modal + Confirm view) ──────────────────────
+    "event.wizard_title": {
+        "de": "Neues Layer-Vote-Event",
+        "en": "New layer vote event",
+    },
+    "event.wizard_start_label": {
+        "de": "Start (DD.MM.YYYY HH:MM) — leer = manuell",
+        "en": "Start (DD.MM.YYYY HH:MM) — empty = manual",
+    },
+    "event.wizard_suggestion_duration_label": {
+        "de": "Vorschlagsphase-Dauer — leer = manuell",
+        "en": "Suggestion phase duration — empty = manual",
+    },
+    "event.wizard_vote_duration_label": {
+        "de": "Abstimmungs-Dauer (max. 14 Tage)",
+        "en": "Voting duration (max 14 days)",
+    },
+    "event.wizard_invalid_date_time": {
+        "de": "Ungültiges Datum/Uhrzeit: `{value}`. Format: `DD.MM.YYYY HH:MM`.",
+        "en": "Invalid date/time: `{value}`. Format: `DD.MM.YYYY HH:MM`.",
+    },
+    "event.wizard_confirm_title": {
+        "de": "Event-Konfiguration bestätigen",
+        "en": "Confirm event configuration",
+    },
+    "event.wizard_confirm_desc": {
+        "de": "Wähle Rolle/Nutzer, die teilnehmen dürfen (optional), die Layer-Quellen und ob mehrere Stimmen erlaubt sind. Dann **Bestätigen**.",
+        "en": "Pick the role/user allowed to participate (optional), the layer sources, and whether multiple votes are allowed. Then **Confirm**.",
+    },
+    "event.wizard_gate_placeholder": {
+        "de": "Rolle/Nutzer, die teilnehmen dürfen (optional)",
+        "en": "Role/user allowed to participate (optional)",
+    },
+    "event.wizard_multi_on": {
+        "de": "Mehrfachstimmen: AN",
+        "en": "Multiple votes: ON",
+    },
+    "event.wizard_multi_off": {
+        "de": "Mehrfachstimmen: AUS",
+        "en": "Multiple votes: OFF",
     },
 
     # ── Settings display ──────────────────────────────────────────────────
@@ -490,6 +630,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Layer zur History hinzugefügt.",
         "en": "Layer added to history.",
     },
+    "history.remove_title": {
+        "de": "Layer aus History entfernen",
+        "en": "Remove Layer from History",
+    },
+    "history.confirm_remove_title": {
+        "de": "History-Eintrag entfernen?",
+        "en": "Remove history entry?",
+    },
+    "history.confirm_remove_prompt": {
+        "de": "Möchtest du diesen History-Eintrag wirklich entfernen?\n{layer}",
+        "en": "Do you really want to remove this history entry?\n{layer}",
+    },
     "history.remove_prompt": {
         "de": "Wähle einen History-Eintrag zum Entfernen:",
         "en": "Select a history entry to remove:",
@@ -540,9 +692,189 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Event löschen",
         "en": "Delete Event",
     },
+    "admin.edit_event": {
+        "de": "Event bearbeiten",
+        "en": "Edit Event",
+    },
     "admin.random_count_label": {
         "de": "Anzahl zufälliger Layers",
         "en": "Number of random layers",
+    },
+    "admin.remove_suggestion": {
+        "de": "Vorschlag entfernen",
+        "en": "Remove Suggestion",
+    },
+    "admin.remove_select": {
+        "de": "Zu entfernenden Vorschlag auswählen",
+        "en": "Select a suggestion to remove",
+    },
+    "admin.remove_select_chunk": {
+        "de": "Zu entfernenden Vorschlag auswählen ({current}/{total})",
+        "en": "Select a suggestion to remove ({current}/{total})",
+    },
+    "admin.remove_prompt": {
+        "de": "Wähle einen der **{count}** Vorschläge zum Entfernen aus.",
+        "en": "Pick one of the **{count}** suggestions to remove.",
+    },
+    "admin.no_suggestions": {
+        "de": "Keine Vorschläge vorhanden.",
+        "en": "There are no suggestions to remove.",
+    },
+    "admin.suggestion_removed": {
+        "de": "Vorschlag entfernt: {layer}",
+        "en": "Suggestion removed: {layer}",
+    },
+    "admin.remove_not_found": {
+        "de": "Vorschlag nicht gefunden (möglicherweise bereits entfernt).",
+        "en": "Suggestion not found (it may have already been removed).",
+    },
+    "admin.confirm_remove_title": {
+        "de": "Vorschlag entfernen?",
+        "en": "Remove suggestion?",
+    },
+    "admin.confirm_remove_prompt": {
+        "de": "Möchtest du den Vorschlag von **{user}** wirklich entfernen?\n{layer}",
+        "en": "Do you really want to remove **{user}**'s suggestion?\n{layer}",
+    },
+
+    # ── Event edit DM dialog ─────────────────────────────────────────────
+    "edit.title": {
+        "de": "Event-Konfiguration bearbeiten",
+        "en": "Edit Event Configuration",
+    },
+    "edit.select_property": {
+        "de": "Wähle eine Eigenschaft zum Bearbeiten — Änderungen gelten nur für dieses Event.",
+        "en": "Pick a property to edit — changes apply to this event only.",
+    },
+    "edit.pick_property_placeholder": {
+        "de": "Eigenschaft auswählen",
+        "en": "Select a property",
+    },
+    "edit.dm_sent": {
+        "de": "Bearbeitungsdialog wurde dir per DM geschickt.",
+        "en": "Edit dialog sent to your DMs.",
+    },
+    "edit.dm_blocked": {
+        "de": "Konnte keine DM senden — bitte erlaube DMs von Server-Mitgliedern.",
+        "en": "Couldn't open a DM — please allow DMs from server members.",
+    },
+    "edit.session_active": {
+        "de": "Du hast bereits eine offene Bearbeitungssitzung. Schließe diese zuerst.",
+        "en": "You already have an active edit session — close it first.",
+    },
+    "edit.done": {
+        "de": "Fertig",
+        "en": "Done",
+    },
+    "edit.finished": {
+        "de": "Bearbeitung abgeschlossen.",
+        "en": "Edit session closed.",
+    },
+    "edit.event_link": {
+        "de": "Zum Event",
+        "en": "Go to event",
+    },
+    "edit.timeout": {
+        "de": "Ich bin mir nicht sicher, wohin du gegangen bist. Wir können es später erneut versuchen.",
+        "en": "I'm not sure where you went. We can try again later.",
+    },
+    "edit.list_prompt": {
+        "de": "Wähle die gewünschten Werte aus und bestätige (Auswahl speichert sofort).",
+        "en": "Select the desired values — your choice saves immediately.",
+    },
+    "edit.list_placeholder": {
+        "de": "Werte auswählen",
+        "en": "Select values",
+    },
+    "edit.bool_prompt": {
+        "de": "Aktueller Wert: {value}. Wähle einen neuen Wert.",
+        "en": "Current value: {value}. Pick a new value.",
+    },
+    "edit.bool_yes": {
+        "de": "Ja",
+        "en": "Yes",
+    },
+    "edit.bool_no": {
+        "de": "Nein",
+        "en": "No",
+    },
+    "edit.int_prompt": {
+        "de": "Aktuell: `{current}` (Bereich {min}–{max}). Klicke ⌨️, um einen neuen Wert einzugeben.",
+        "en": "Current: `{current}` (range {min}–{max}). Click ⌨️ to enter a new value.",
+    },
+    "edit.duration_prompt": {
+        "de": "Aktuell: `{current}`. Klicke ⌨️, um einen neuen Wert einzugeben (z.B. `60`, `2h`, `1d`).",
+        "en": "Current: `{current}`. Click ⌨️ to enter a new value (e.g. `60`, `2h`, `1d`).",
+    },
+    "edit.open_input": {
+        "de": "Wert eingeben",
+        "en": "Enter value",
+    },
+    "edit.input_label": {
+        "de": "Neuer Wert",
+        "en": "New value",
+    },
+    "edit.invalid_int": {
+        "de": "Ungültige Zahl: `{value}`.",
+        "en": "Invalid number: `{value}`.",
+    },
+    "edit.out_of_range": {
+        "de": "Wert {value} außerhalb des erlaubten Bereichs ({min}–{max}).",
+        "en": "Value {value} is outside the allowed range ({min}–{max}).",
+    },
+    "edit.updated_inline": {
+        "de": "**{prop}** aktualisiert.",
+        "en": "**{prop}** updated.",
+    },
+
+    # Edit dialog property labels
+    "edit.prop.allowed_gamemodes": {
+        "de": "Erlaubte Spielmodi",
+        "en": "Allowed Gamemodes",
+    },
+    "edit.prop.blacklisted_maps": {
+        "de": "Gesperrte Maps",
+        "en": "Blacklisted Maps",
+    },
+    "edit.prop.blacklisted_factions": {
+        "de": "Gesperrte Fraktionen",
+        "en": "Blacklisted Factions",
+    },
+    "edit.prop.blacklisted_units": {
+        "de": "Gesperrte Einheitstypen",
+        "en": "Blacklisted Unit Types",
+    },
+    "edit.prop.max_per_user": {
+        "de": "Max. Vorschläge pro Nutzer",
+        "en": "Max Suggestions per User",
+    },
+    "edit.prop.max_total": {
+        "de": "Max. Vorschläge insgesamt",
+        "en": "Max Total Suggestions",
+    },
+    "edit.prop.history_lookback": {
+        "de": "History-Lookback (Events)",
+        "en": "History Lookback (events)",
+    },
+    "edit.prop.allowed_sources": {
+        "de": "Erlaubte Layer-Quellen",
+        "en": "Allowed Layer Sources",
+    },
+    "edit.prop.voting_duration": {
+        "de": "Abstimmungsdauer (Stunden)",
+        "en": "Voting Duration (hours)",
+    },
+    "edit.prop.max_voting_layers": {
+        "de": "Max. Layers in Abstimmung",
+        "en": "Max Voting Layers",
+    },
+    "edit.prop.allow_multiple_votes": {
+        "de": "Mehrfachstimmen erlauben",
+        "en": "Allow Multiple Votes",
+    },
+    "edit.prop.suggestion_duration": {
+        "de": "Vorschlagsphasen-Dauer",
+        "en": "Suggestion Phase Duration",
     },
 }
 

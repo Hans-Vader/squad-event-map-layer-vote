@@ -14,9 +14,15 @@ import discord
 from discord import Embed
 
 from i18n import t
-from config import ADMIN_IDS, SQUADCALC_BASE_URL
+from config import ADMIN_IDS, LAYERS_JSON_SOURCES, SQUADCALC_BASE_URL
 
 logger = logging.getLogger("layer_vote")
+
+# Layer source whose factionIds and map names map cleanly to SquadCalc params.
+# Layers from any other source still get a clickable map icon, but the URL
+# points at SquadCalc's homepage (since the params would 404) and the
+# layer-specific info is surfaced via a hover tooltip on the link instead.
+SQUADCALC_COMPATIBLE_SOURCE = "main"
 
 # ---------------------------------------------------------------------------
 # Log channel — set per guild at runtime
@@ -96,6 +102,31 @@ def is_guild_admin(user) -> bool:
     return False
 
 
+def check_role_gate(event: dict, user) -> bool:
+    """Check if a user is allowed to participate in a gated event.
+
+    The event's `allowed_role_ids` and `allowed_user_ids` form the allow-list.
+    Both empty = no gate (anyone allowed). Bot-level admins always pass so
+    operators can test restricted events without being on the allow-list.
+    Organizers do NOT auto-bypass: the gate is about participation, not
+    moderation, and an organizer running the event isn't automatically on
+    the team that's supposed to vote.
+    """
+    if hasattr(user, "id") and str(user.id) in ADMIN_IDS:
+        return True
+    role_ids = event.get("allowed_role_ids") or []
+    user_ids = event.get("allowed_user_ids") or []
+    if not role_ids and not user_ids:
+        return True
+    if hasattr(user, "id") and str(user.id) in [str(uid) for uid in user_ids]:
+        return True
+    if hasattr(user, "roles"):
+        user_role_ids = {r.id for r in user.roles}
+        if any(rid in user_role_ids for rid in role_ids):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Layer formatting
 # ---------------------------------------------------------------------------
@@ -118,8 +149,17 @@ def format_layer_short(suggestion: dict) -> str:
 
 
 def build_squadcalc_url(suggestion: dict) -> Optional[str]:
-    """Build a SquadCalc URL for the given suggestion, or None if disabled."""
+    """Build a SquadCalc URL for the given suggestion, or None if disabled.
+
+    Only returns a parameterized URL for layers from the SquadCalc-compatible
+    source ("main"); SPM/SU layers don't round-trip into SquadCalc params, so
+    callers should handle non-main sources via build_map_icon_markdown.
+    """
     if not SQUADCALC_BASE_URL:
+        return None
+
+    source = suggestion.get("source") or ""
+    if source and source != SQUADCALC_COMPATIBLE_SOURCE:
         return None
 
     map_name = suggestion.get("map_name", "")
@@ -155,10 +195,60 @@ def build_squadcalc_url(suggestion: dict) -> Optional[str]:
     return f"{SQUADCALC_BASE_URL}/?{urlencode(params)}"
 
 
-def format_suggestion_entry(index: int, suggestion: dict) -> str:
-    """Format a suggestion as a single-line embed entry.
+def _build_layer_tooltip(suggestion: dict) -> str:
+    """One-line tooltip text: map + mode + full faction names."""
+    map_name = suggestion.get("map_name", "?")
+    gamemode = suggestion.get("gamemode", "?")
+    version = suggestion.get("layer_version", "")
+    mode_str = f"{gamemode} {version}".strip() if version else gamemode
 
-    Example: 🗺️ **1. Al Basrah** — AAS v1 ⚔️ USMC/CombinedArms vs RGF/Mechanized • UserName
+    t1_name = suggestion.get("team1_faction_name") or suggestion.get("team1_faction") or "?"
+    t2_name = suggestion.get("team2_faction_name") or suggestion.get("team2_faction") or "?"
+
+    text = f"{map_name} {mode_str} — {t1_name} vs {t2_name}"
+    # Markdown link titles are quoted with `"`; replace any embedded quotes so
+    # the link doesn't break (e.g. SU_IRGC's name contains "Saberin Unit").
+    return text.replace('"', "'")
+
+
+# No-op masked-link target used to attach a hover tooltip to the 🗺 icon for
+# non-main-source layers — Discord requires a URL on masked links, but we
+# don't want to send users to SquadCalc since it doesn't recognize SPM/SU
+# maps or factions. discord.com keeps the click inside the user's Discord.
+_TOOLTIP_NOOP_URL = SQUADCALC_BASE_URL
+
+
+def build_map_icon_markdown(suggestion: dict) -> str:
+    """Render the 🗺️ map icon for embeds.
+
+    Both main and SPM/SU layers go through the same link template; only the
+    URL target differs (SquadCalc when usable, a no-op Discord URL otherwise).
+    The hover tooltip — map + version + full faction names — is identical
+    across sources. Falls back to a plain emoji when no URL is available
+    (e.g. SquadCalc disabled and main source).
+    """
+    url = build_squadcalc_url(suggestion) or _fallback_icon_url(suggestion)
+    if not url:
+        return "🗺️"
+    return f'[🗺️]({url} "{_build_layer_tooltip(suggestion)}")'
+
+
+def _fallback_icon_url(suggestion: dict) -> Optional[str]:
+    """No-op masked-link target for non-main sources, or None if main."""
+    source = suggestion.get("source") or ""
+    if source and source != SQUADCALC_COMPATIBLE_SOURCE:
+        return _TOOLTIP_NOOP_URL
+    return None
+
+
+def format_suggestion_entry(index: int, suggestion: dict,
+                            vote_count: Optional[int] = None) -> str:
+    """Format a suggestion as a two-line embed entry.
+
+    When ``vote_count`` is given, prepend a 🗳️ vote-count indicator before
+    the map icon. Pass ``None`` (the default) during phases where a poll
+    doesn't exist yet to render without the prefix. The submitter's name
+    is rendered on a second line below the suggestion.
     """
     gamemode = suggestion.get("gamemode", "?")
     gm_short = _GAMEMODE_ABBREV.get(gamemode, gamemode)
@@ -174,12 +264,13 @@ def format_suggestion_entry(index: int, suggestion: dict) -> str:
 
     mode_str = f"{gm_short} {version}".strip() if version else gm_short
 
-    url = build_squadcalc_url(suggestion)
-    map_icon = f"[🗺️]({url})" if url else "🗺️"
+    map_icon = build_map_icon_markdown(suggestion)
 
+    prefix = f"🗳️ {vote_count} | " if vote_count is not None else ""
     return (
-        f"{map_icon} **{index}. {map_name}**: {mode_str} "
-        f"⚔️ {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit} • {user_name}"
+        f"{prefix}{map_icon} **{index}. {map_name}**: {mode_str} "
+        f"⚔️ {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit}\n"
+        f"👤 {user_name}"
     )
 
 
@@ -195,6 +286,7 @@ _MAP_NAME_ABBREV = {
 
 _UNIT_ABBREV = {
     "LightInfantry": "LightInf",
+    "CombinedArms": "CombArms"
 }
 
 
@@ -209,8 +301,8 @@ def format_layer_poll_option(suggestion: dict) -> str:
     t2_unit = _UNIT_ABBREV.get(suggestion.get("team2_unit", "?"), suggestion.get("team2_unit", "?"))
 
     gm_short = _GAMEMODE_ABBREV.get(gamemode, gamemode)
-    mode_str = f"{gm_short} {version}".strip() if version else gm_short
-    text = f"{map_name} {mode_str} — {t1_faction} ({t1_unit}) vs {t2_faction} ({t2_unit})"
+    mode_str = f"{gm_short}{version}".strip() if version else gm_short
+    text = f"{map_name} {mode_str} {t1_faction}({t1_unit}) vs {t2_faction}({t2_unit})"
     if len(text) > 55:
         text = text[:52] + "..."
     return text
@@ -227,6 +319,61 @@ def suggestion_matches(s1: dict, s2: dict) -> bool:
 # Embed builders
 # ---------------------------------------------------------------------------
 
+_SUPERMOD_SOURCE = "supermod"
+
+
+def _event_uses_supermod(event: dict, settings: dict) -> bool:
+    """Whether the supermod layer source is among this event's active sources.
+
+    Mirrors the precedence used by bot._resolve_event_sources without needing
+    a database lookup: explicit event sources first, then the guild cap, then
+    the full configured source list as a legacy fallback.
+    """
+    explicit = event.get("allowed_sources") or []
+    guild_allowed = settings.get("allowed_sources") or []
+
+    if explicit:
+        candidate = list(explicit)
+    elif guild_allowed:
+        candidate = list(guild_allowed)
+    else:
+        candidate = [name for name, _ in LAYERS_JSON_SOURCES]
+
+    if explicit and guild_allowed:
+        candidate = [s for s in candidate if s in guild_allowed]
+
+    return _SUPERMOD_SOURCE in candidate
+
+
+def _split_entries_evenly(entries: list[str], max_len: int = 1024) -> list[str]:
+    """Distribute entries across the minimum number of embed fields needed
+    so each field's joined value fits within ``max_len`` characters, with
+    chunks balanced as evenly as possible by entry count.
+
+    For N entries split into K fields, the first ``N % K`` fields get one
+    extra entry — so e.g. 8 → [4, 4], 10 → [4, 3, 3], 9 → [5, 4].
+    """
+    n = len(entries)
+    if n == 0:
+        return []
+    for k in range(1, n + 1):
+        base, extra = divmod(n, k)
+        chunks: list[str] = []
+        i = 0
+        ok = True
+        for j in range(k):
+            size = base + (1 if j < extra else 0)
+            value = "\n".join(entries[i:i + size])
+            if len(value) > max_len:
+                ok = False
+                break
+            chunks.append(value)
+            i += size
+        if ok:
+            return chunks
+    return list(entries)
+
+
 def _embed_total_chars(embed: Embed) -> int:
     """Return total character count of an embed (Discord limit: 6000)."""
     total = len(embed.title or "") + len(embed.description or "")
@@ -237,8 +384,15 @@ def _embed_total_chars(embed: Embed) -> int:
     return total
 
 
-def build_event_embed(event: dict, settings: dict) -> Embed:
-    """Build the main event embed displayed in the channel."""
+def build_event_embed(event: dict, settings: dict,
+                      vote_counts: Optional[dict] = None) -> Embed:
+    """Build the main event embed displayed in the channel.
+
+    During the voting phase, callers can pass `vote_counts` (mapping
+    suggestion id → live vote_count from the poll) to render per-layer
+    counts inline. Suggestions not in `selected_for_vote` aren't part of
+    the poll and stay countless.
+    """
     phase = event.get("phase", "created")
     lang = settings.get("language", "en")
 
@@ -295,23 +449,22 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
     if phase in ("suggestions_open", "suggestions_closed", "voting"):
         header = f"📋 {t('embed.suggestions_header', lang)} ({len(suggestions)})"
         if suggestions:
-            entries = [format_suggestion_entry(i, s) for i, s in enumerate(suggestions, 1)]
+            show_counts = phase == "voting" and vote_counts is not None
 
-            # Split entries across multiple fields (each ≤1024 chars)
-            fields: list[str] = []
-            current_chunk: list[str] = []
-            current_len = 0
-            for entry in entries:
-                line_len = len(entry) + (1 if current_chunk else 0)  # +1 for \n
-                if current_chunk and current_len + line_len > 1024:
-                    fields.append("\n".join(current_chunk))
-                    current_chunk = [entry]
-                    current_len = len(entry)
-                else:
-                    current_chunk.append(entry)
-                    current_len += line_len
-            if current_chunk:
-                fields.append("\n".join(current_chunk))
+            def _entry_count(sug: dict) -> Optional[int]:
+                if not show_counts:
+                    return None
+                return vote_counts.get(sug.get("id"), 0)
+
+            entries = [
+                format_suggestion_entry(i, s, vote_count=_entry_count(s))
+                for i, s in enumerate(suggestions, 1)
+            ]
+
+            # Distribute entries evenly across the minimum number of fields
+            # needed (each ≤1024 chars), so e.g. 8 long entries render as
+            # 4+4 rather than 3+4+1.
+            fields = _split_entries_evenly(entries)
 
             # Add fields — first gets the header, continuations use zero-width space
             for idx, field_value in enumerate(fields):
@@ -323,25 +476,10 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
                 entries.pop()
                 remaining = len(suggestions) - len(entries)
 
-                # Rebuild fields from trimmed entries
-                fields = []
-                current_chunk = []
-                current_len = 0
-                for entry in entries:
-                    line_len = len(entry) + (1 if current_chunk else 0)
-                    if current_chunk and current_len + line_len > 1024:
-                        fields.append("\n".join(current_chunk))
-                        current_chunk = [entry]
-                        current_len = len(entry)
-                    else:
-                        current_chunk.append(entry)
-                        current_len += line_len
-                if current_chunk:
-                    last = "\n".join(current_chunk)
-                    last += f"\n... and {remaining} more"
-                    fields.append(last)
+                fields = _split_entries_evenly(entries)
+                if fields:
+                    fields[-1] = f"{fields[-1]}\n... and {remaining} more"
 
-                # Replace suggestion fields in embed
                 embed.clear_fields()
                 embed.add_field(name=t("embed.status", lang), value=status_text, inline=False)
                 for idx, field_value in enumerate(fields):
@@ -361,15 +499,18 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
             map_name = winner.get("map_name", "?")
             gamemode = winner.get("gamemode", "?")
             version = winner.get("layer_version", "")
-            t1 = winner.get("team1_faction", "?")
+            t1_id = winner.get("team1_faction", "?")
+            t2_id = winner.get("team2_faction", "?")
+            # Prefer the human-readable factionName captured at submit time;
+            # fall back to the factionId for legacy history rows.
+            t1 = winner.get("team1_faction_name") or t1_id
+            t2 = winner.get("team2_faction_name") or t2_id
             t1u = winner.get("team1_unit", "?")
-            t2 = winner.get("team2_faction", "?")
             t2u = winner.get("team2_unit", "?")
 
             mode_str = f"{gamemode} {version}".strip() if version else gamemode
 
-            url = build_squadcalc_url(winner)
-            map_icon = f"[🗺️]({url})" if url else "🗺️"
+            map_icon = build_map_icon_markdown(winner)
 
             winner_text = (
                 f"{map_icon} **{map_name}** — {mode_str}\n"
@@ -382,93 +523,19 @@ def build_event_embed(event: dict, settings: dict) -> Embed:
                 inline=False,
             )
 
-    # Footer (SquadCalc hint) only makes sense when clickable map icons are
-    # actually visible: during/after suggestions, or on a completed winner.
-    show_footer = (
-        phase in ("suggestions_open", "suggestions_closed", "voting")
-        and event.get("suggestions")
-    ) or (phase == "completed" and event.get("winning_layer"))
-    if show_footer:
-        embed.set_footer(text=t("embed.footer", lang))
-    return embed
-
-
-def build_settings_embed(settings: dict, guild: discord.Guild, layer_count: int) -> Embed:
-    """Build an embed showing all current guild settings."""
-    lang = settings.get("language", "en")
-    embed = Embed(title=t("settings.title", lang), color=discord.Color.blurple())
-
-    orga_role_id = settings.get("organizer_role_id", 0)
-    orga_role = guild.get_role(orga_role_id)
-    embed.add_field(
-        name=t("settings.organizer_role", lang),
-        value=orga_role.mention if orga_role else f"ID: {orga_role_id}",
-        inline=True,
-    )
-
-    log_ch_id = settings.get("log_channel_id")
-    embed.add_field(
-        name=t("settings.log_channel", lang),
-        value=f"<#{log_ch_id}>" if log_ch_id else "—",
-        inline=True,
-    )
-
-    embed.add_field(name=t("settings.language", lang), value=lang.upper(), inline=True)
-
-    embed.add_field(
-        name=t("settings.allowed_gamemodes", lang),
-        value=", ".join(settings.get("allowed_gamemodes", [])) or "—",
-        inline=False,
-    )
-
-    embed.add_field(
-        name=t("settings.blacklisted_maps", lang),
-        value=", ".join(settings.get("blacklisted_maps", [])) or "—",
-        inline=False,
-    )
-
-    bl_factions = settings.get("blacklisted_factions", [])
-    if bl_factions:
-        embed.add_field(
-            name=t("settings.blacklisted_factions", lang),
-            value=", ".join(bl_factions),
-            inline=False,
-        )
-
-    bl_units = settings.get("blacklisted_units", [])
-    if bl_units:
-        embed.add_field(
-            name=t("settings.blacklisted_units", lang),
-            value=", ".join(bl_units),
-            inline=False,
-        )
-
-    embed.add_field(
-        name=t("settings.max_suggestions", lang),
-        value=str(settings.get("max_suggestions_per_user", 2)),
-        inline=True,
-    )
-    embed.add_field(
-        name=t("settings.history_lookback", lang),
-        value=str(settings.get("history_lookback_events", 3)),
-        inline=True,
-    )
-    embed.add_field(
-        name=t("settings.layer_cache", lang),
-        value=str(layer_count),
-        inline=True,
-    )
-
-    defaults_value = (
-        f"`suggestion_start`: {settings.get('default_suggestion_start') or '—'}\n"
-        f"`suggestion_duration`: {settings.get('default_suggestion_duration') or '—'}\n"
-        f"`voting_duration_hours`: {settings.get('default_voting_duration_hours', 24)}\n"
-        f"`allow_multiple_votes`: {settings.get('default_allow_multiple_votes', False)}"
-    )
-    embed.add_field(
-        name=t("settings.create_suggestion_defaults", lang),
-        value=defaults_value,
-        inline=False,
-    )
-
+    # Footer: when the supermod source is active, the legend takes the slot
+    # so users can decode SPM/SU and GoingDark prefixes (the SquadCalc hint
+    # is suppressed since SquadCalc has no supermod map data anyway).
+    # Otherwise we fall back to the SquadCalc hint, which only makes sense
+    # when clickable map icons are visible (during/after suggestions, or on
+    # a completed winner).
+    if _event_uses_supermod(event, settings):
+        embed.set_footer(text=t("embed.footer_legend_supermod", lang))
+    else:
+        show_squadcalc_hint = (
+            phase in ("suggestions_open", "suggestions_closed", "voting")
+            and event.get("suggestions")
+        ) or (phase == "completed" and event.get("winning_layer"))
+        if show_squadcalc_hint:
+            embed.set_footer(text=t("embed.footer", lang))
     return embed
