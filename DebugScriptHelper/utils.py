@@ -241,10 +241,14 @@ def _fallback_icon_url(suggestion: dict) -> Optional[str]:
     return None
 
 
-def format_suggestion_entry(index: int, suggestion: dict) -> str:
-    """Format a suggestion as a single-line embed entry.
+def format_suggestion_entry(index: int, suggestion: dict,
+                            vote_count: Optional[int] = None) -> str:
+    """Format a suggestion as a two-line embed entry.
 
-    Example: 🗺️ **1. Al Basrah** — AAS v1 ⚔️ USMC/CombinedArms vs RGF/Mechanized • UserName
+    When ``vote_count`` is given, prepend a 🗳️ vote-count indicator before
+    the map icon. Pass ``None`` (the default) during phases where a poll
+    doesn't exist yet to render without the prefix. The submitter's name
+    is rendered on a second line below the suggestion.
     """
     gamemode = suggestion.get("gamemode", "?")
     gm_short = _GAMEMODE_ABBREV.get(gamemode, gamemode)
@@ -262,9 +266,11 @@ def format_suggestion_entry(index: int, suggestion: dict) -> str:
 
     map_icon = build_map_icon_markdown(suggestion)
 
+    prefix = f"🗳️ {vote_count} | " if vote_count is not None else ""
     return (
-        f"{map_icon} **{index}. {map_name}**: {mode_str} "
-        f"⚔️ {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit} • {user_name}"
+        f"{prefix}{map_icon} **{index}. {map_name}**: {mode_str} "
+        f"⚔️ {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit}\n"
+        f"👤 {user_name}"
     )
 
 
@@ -337,6 +343,35 @@ def _event_uses_supermod(event: dict, settings: dict) -> bool:
         candidate = [s for s in candidate if s in guild_allowed]
 
     return _SUPERMOD_SOURCE in candidate
+
+
+def _split_entries_evenly(entries: list[str], max_len: int = 1024) -> list[str]:
+    """Distribute entries across the minimum number of embed fields needed
+    so each field's joined value fits within ``max_len`` characters, with
+    chunks balanced as evenly as possible by entry count.
+
+    For N entries split into K fields, the first ``N % K`` fields get one
+    extra entry — so e.g. 8 → [4, 4], 10 → [4, 3, 3], 9 → [5, 4].
+    """
+    n = len(entries)
+    if n == 0:
+        return []
+    for k in range(1, n + 1):
+        base, extra = divmod(n, k)
+        chunks: list[str] = []
+        i = 0
+        ok = True
+        for j in range(k):
+            size = base + (1 if j < extra else 0)
+            value = "\n".join(entries[i:i + size])
+            if len(value) > max_len:
+                ok = False
+                break
+            chunks.append(value)
+            i += size
+        if ok:
+            return chunks
+    return list(entries)
 
 
 def _embed_total_chars(embed: Embed) -> int:
@@ -414,33 +449,22 @@ def build_event_embed(event: dict, settings: dict,
     if phase in ("suggestions_open", "suggestions_closed", "voting"):
         header = f"📋 {t('embed.suggestions_header', lang)} ({len(suggestions)})"
         if suggestions:
-            selected_ids = set(event.get("selected_for_vote") or [])
             show_counts = phase == "voting" and vote_counts is not None
 
-            def _entry_with_count(idx: int, sug: dict) -> str:
-                base = format_suggestion_entry(idx, sug)
-                if show_counts and sug.get("id") in selected_ids:
-                    count = vote_counts.get(sug.get("id"), 0)
-                    base += f" · 🗳️ **{count}**"
-                return base
+            def _entry_count(sug: dict) -> Optional[int]:
+                if not show_counts:
+                    return None
+                return vote_counts.get(sug.get("id"), 0)
 
-            entries = [_entry_with_count(i, s) for i, s in enumerate(suggestions, 1)]
+            entries = [
+                format_suggestion_entry(i, s, vote_count=_entry_count(s))
+                for i, s in enumerate(suggestions, 1)
+            ]
 
-            # Split entries across multiple fields (each ≤1024 chars)
-            fields: list[str] = []
-            current_chunk: list[str] = []
-            current_len = 0
-            for entry in entries:
-                line_len = len(entry) + (1 if current_chunk else 0)  # +1 for \n
-                if current_chunk and current_len + line_len > 1024:
-                    fields.append("\n".join(current_chunk))
-                    current_chunk = [entry]
-                    current_len = len(entry)
-                else:
-                    current_chunk.append(entry)
-                    current_len += line_len
-            if current_chunk:
-                fields.append("\n".join(current_chunk))
+            # Distribute entries evenly across the minimum number of fields
+            # needed (each ≤1024 chars), so e.g. 8 long entries render as
+            # 4+4 rather than 3+4+1.
+            fields = _split_entries_evenly(entries)
 
             # Add fields — first gets the header, continuations use zero-width space
             for idx, field_value in enumerate(fields):
@@ -452,25 +476,10 @@ def build_event_embed(event: dict, settings: dict,
                 entries.pop()
                 remaining = len(suggestions) - len(entries)
 
-                # Rebuild fields from trimmed entries
-                fields = []
-                current_chunk = []
-                current_len = 0
-                for entry in entries:
-                    line_len = len(entry) + (1 if current_chunk else 0)
-                    if current_chunk and current_len + line_len > 1024:
-                        fields.append("\n".join(current_chunk))
-                        current_chunk = [entry]
-                        current_len = len(entry)
-                    else:
-                        current_chunk.append(entry)
-                        current_len += line_len
-                if current_chunk:
-                    last = "\n".join(current_chunk)
-                    last += f"\n... and {remaining} more"
-                    fields.append(last)
+                fields = _split_entries_evenly(entries)
+                if fields:
+                    fields[-1] = f"{fields[-1]}\n... and {remaining} more"
 
-                # Replace suggestion fields in embed
                 embed.clear_fields()
                 embed.add_field(name=t("embed.status", lang), value=status_text, inline=False)
                 for idx, field_value in enumerate(fields):

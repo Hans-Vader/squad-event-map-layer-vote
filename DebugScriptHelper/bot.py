@@ -4358,6 +4358,24 @@ async def cmd_clear_event_roles(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="update", description="Refresh the event embed (organizer only)")
+async def cmd_update(interaction: discord.Interaction):
+    settings = await check_guild_configured(interaction)
+    if not settings:
+        return
+    if not await check_organizer(interaction, settings):
+        return
+
+    lang = settings.get("language", "en")
+
+    db_id = await _resolve_channel_event(interaction, lang)
+    if db_id is None:
+        return
+
+    await _update_event_embed(db_id)
+    await interaction.response.send_message(t("general.success", lang), ephemeral=True)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SLASH COMMANDS — User
 # ═══════════════════════════════════════════════════════════════════════════
