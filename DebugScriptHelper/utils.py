@@ -266,7 +266,7 @@ def format_suggestion_entry(index: int, suggestion: dict,
 
     map_icon = build_map_icon_markdown(suggestion)
 
-    prefix = f"🗳️ {vote_count} | " if vote_count is not None else ""
+    prefix = f"🗳️ **{vote_count}** | " if vote_count is not None else ""
     return (
         f"{prefix}{map_icon} **{index}. {map_name}**: {mode_str} "
         f"⚔️ {t1_faction}/{t1_unit} vs {t2_faction}/{t2_unit}\n"
