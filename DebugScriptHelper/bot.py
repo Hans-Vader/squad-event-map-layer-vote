@@ -2191,12 +2191,18 @@ async def _start_poll(interaction: discord.Interaction, db_id: int,
         except discord.HTTPException as e:
             logger.warning(f"Failed to lock voting thread {voting_thread.id}: {e}")
 
+    poll_end_time = (
+        getattr(poll_message.poll, "expires_at", None)
+        or datetime.now() + timedelta(hours=duration_hours)
+    )
+
     lock = _get_guild_lock(interaction.guild_id)
     async with lock:
         record = db.get_event_by_db_id(interaction.guild_id, db_id)
         if record:
             event = record["event"]
             event["poll_message_id"] = poll_message.id
+            event["voting_end_time"] = poll_end_time
             if voting_thread is not None:
                 event["vote_thread_id"] = voting_thread.id
             db.save_event(record["db_id"], event)
@@ -2266,11 +2272,17 @@ async def _auto_start_poll(db_id: int, selected_ids: list[str]) -> bool:
         except discord.HTTPException as e:
             logger.warning(f"Failed to lock voting thread {voting_thread.id}: {e}")
 
+    poll_end_time = (
+        getattr(poll_message.poll, "expires_at", None)
+        or datetime.now() + timedelta(hours=duration_hours)
+    )
+
     lock = _get_guild_lock(guild_id)
     async with lock:
         rec = db.get_active_event_unsafe(db_id)
         if rec:
             rec["event"]["poll_message_id"] = poll_message.id
+            rec["event"]["voting_end_time"] = poll_end_time
             if voting_thread is not None:
                 rec["event"]["vote_thread_id"] = voting_thread.id
             db.save_event(rec["db_id"], rec["event"])

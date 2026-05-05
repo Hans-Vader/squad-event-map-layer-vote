@@ -435,7 +435,12 @@ def build_event_embed(event: dict, settings: dict,
         count = len(event.get("suggestions", []))
         status_text = t("embed.status_suggestions_closed", lang, count=count)
     elif phase == "voting":
-        status_text = t("embed.status_voting", lang)
+        end_time = event.get("voting_end_time")
+        if end_time and isinstance(end_time, datetime):
+            ts = int(end_time.timestamp())
+            status_text = t("embed.status_voting_until", lang, ts=ts)
+        else:
+            status_text = t("embed.status_voting", lang)
     elif phase == "completed":
         status_text = t("embed.status_completed", lang)
     else:
