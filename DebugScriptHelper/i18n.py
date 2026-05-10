@@ -810,6 +810,36 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Aktuell: `{current}`. Klicke ⌨️, um einen neuen Wert einzugeben (z.B. `60`, `2h`, `1d`).",
         "en": "Current: `{current}`. Click ⌨️ to enter a new value (e.g. `60`, `2h`, `1d`).",
     },
+    "edit.datetime_prompt": {
+        "de": "Aktuell: `{current}`. Klicke ⌨️, um einen neuen Wert im Format `DD.MM.YYYY HH:MM` einzugeben — leer lassen für „manuell starten“.",
+        "en": "Current: `{current}`. Click ⌨️ to enter a new value as `DD.MM.YYYY HH:MM` — leave blank for manual start.",
+    },
+    "edit.invalid_datetime": {
+        "de": "Ungültiges Datum/Uhrzeit: `{value}`. Erwartetes Format: `DD.MM.YYYY HH:MM`.",
+        "en": "Invalid date/time: `{value}`. Expected format: `DD.MM.YYYY HH:MM`.",
+    },
+    "edit.locked_phase": {
+        "de": "Diese Eigenschaft kann nicht mehr geändert werden — die Vorschlagsphase hat bereits begonnen.",
+        "en": "This property can no longer be edited — the suggestion phase has already started.",
+    },
+    "edit.gate_redirect": {
+        "de": (
+            "Discord-Rollen/Nutzer-Auswahlen funktionieren nicht in DMs. "
+            "Führe in {channel} einen der folgenden Befehle aus:\n"
+            "• `/set_event_roles event_id:{db_id} role:@Rolle user:@Nutzer` — fügt Einträge hinzu\n"
+            "• `/clear_event_roles event_id:{db_id}` — leert die Allow-Liste"
+        ),
+        "en": (
+            "Discord role/user pickers don't work inside DMs. Run one of the "
+            "following in {channel}:\n"
+            "• `/set_event_roles event_id:{db_id} role:@Role user:@User` — add entries\n"
+            "• `/clear_event_roles event_id:{db_id}` — clear the allow-list"
+        ),
+    },
+    "edit.gate_redirect_button": {
+        "de": "Zum Event-Kanal",
+        "en": "Open event channel",
+    },
     "edit.open_input": {
         "de": "Wert eingeben",
         "en": "Enter value",
@@ -879,6 +909,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     "edit.prop.suggestion_duration": {
         "de": "Vorschlagsphasen-Dauer",
         "en": "Suggestion Phase Duration",
+    },
+    "edit.prop.suggestion_start_time": {
+        "de": "Vorschlagsphase Startzeit",
+        "en": "Suggestion Phase Start Time",
+    },
+    "edit.prop.gate": {
+        "de": "Erlaubte Rollen/Nutzer",
+        "en": "Allowed Roles/Users",
     },
 }
 
