@@ -4470,19 +4470,131 @@ async def cmd_delete_event(interaction: discord.Interaction):
     )
 
 
+class EventGateEditView(ui.View):
+    """Ephemeral multi-select picker for the per-event role/user allow-list.
+
+    Opened by /set_event_roles. The MentionableSelect is multi-select (Discord
+    slash-command parameters are single-value only, so multi-edit has to live
+    in a follow-up component). Submit REPLACES the allow-list — it is the
+    canonical view of the current state, not an additive form.
+    """
+
+    def __init__(self, db_id: int, role_ids: list[int], user_ids: list[int],
+                 lang: str):
+        super().__init__(timeout=300)
+        self.db_id = db_id
+        self.lang = lang
+        self.selected_role_ids: list[int] = list(role_ids)
+        self.selected_user_ids: list[int] = list(user_ids)
+
+        # Pre-populate the picker with the existing allow-list. discord.py
+        # 2.4+ exposes SelectDefaultValue / SelectDefaultValueType for this;
+        # the AttributeError fallback keeps older runtimes from blowing up
+        # at import — they just open with an empty selection.
+        default_values = []
+        try:
+            for rid in role_ids:
+                default_values.append(discord.SelectDefaultValue(
+                    id=rid, type=discord.SelectDefaultValueType.role))
+            for uid in user_ids:
+                default_values.append(discord.SelectDefaultValue(
+                    id=uid, type=discord.SelectDefaultValueType.user))
+        except AttributeError:
+            default_values = []
+
+        gate_kwargs = dict(
+            placeholder=t("roles.picker_placeholder", lang),
+            min_values=0,
+            max_values=25,
+            row=0,
+        )
+        if default_values:
+            gate_kwargs["default_values"] = default_values
+
+        self.gate_select = ui.MentionableSelect(**gate_kwargs)
+        self.gate_select.callback = self._on_select
+        self.add_item(self.gate_select)
+
+        submit = ui.Button(
+            label=t("roles.picker_submit", lang),
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            row=1,
+        )
+        submit.callback = self._on_submit
+        self.add_item(submit)
+
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary,
+            emoji="↩️",
+            row=1,
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        roles: list[int] = []
+        users: list[int] = []
+        for v in self.gate_select.values:
+            if isinstance(v, discord.Role):
+                roles.append(v.id)
+            else:
+                users.append(v.id)
+        self.selected_role_ids = roles
+        self.selected_user_ids = users
+        await interaction.response.defer()
+
+    async def _on_submit(self, interaction: discord.Interaction):
+        lock = _get_guild_lock(interaction.guild_id)
+        async with lock:
+            record = db.get_event_by_db_id(interaction.guild_id, self.db_id)
+            if not record:
+                await interaction.response.edit_message(
+                    content=t("event.no_event", self.lang),
+                    embed=None, view=None,
+                )
+                return
+            event = record["event"]
+            event["allowed_role_ids"] = list(self.selected_role_ids)
+            event["allowed_user_ids"] = list(self.selected_user_ids)
+            db.save_event(record["db_id"], event)
+
+        if not self.selected_role_ids and not self.selected_user_ids:
+            content = t("roles.cleared", self.lang)
+        else:
+            mentions = (
+                [f"<@&{rid}>" for rid in self.selected_role_ids]
+                + [f"<@{uid}>" for uid in self.selected_user_ids]
+            )
+            content = t("roles.replaced", self.lang, entries=", ".join(mentions))
+
+        await interaction.response.edit_message(
+            content=content, embed=None, view=None,
+        )
+        await _update_event_embed(self.db_id)
+        await send_to_log_channel(
+            f"Allow-list set by {interaction.user.display_name}: "
+            f"{len(self.selected_role_ids)} role(s), {len(self.selected_user_ids)} user(s)",
+            guild_id=interaction.guild_id,
+        )
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=t("general.cancelled", self.lang),
+            embed=None, view=None,
+        )
+
+
 @bot.tree.command(
     name="set_event_roles",
-    description="Restrict suggesting + voting to specific roles/users for the event in this channel",
+    description="Open the role/user allow-list picker for an event in this channel",
 )
 @app_commands.describe(
-    role="Role allowed to participate (suggest + vote). Can be combined with user.",
-    user="User allowed to participate (suggest + vote). Can be combined with role.",
     event_id="Database ID of the event to modify — required when this channel hosts more than one event.",
 )
 @app_commands.autocomplete(event_id=_event_id_autocomplete)
 async def cmd_set_event_roles(interaction: discord.Interaction,
-                              role: discord.Role = None,
-                              user: discord.Member = None,
                               event_id: int = None):
     settings = await check_guild_configured(interaction)
     if not settings:
@@ -4492,48 +4604,26 @@ async def cmd_set_event_roles(interaction: discord.Interaction,
 
     lang = settings.get("language", "en")
 
-    if role is None and user is None:
-        await interaction.response.send_message(t("roles.no_args", lang), ephemeral=True)
-        return
-
     db_id = await _resolve_channel_event(interaction, lang, db_id_override=event_id)
     if db_id is None:
         return
 
-    changes: list[str] = []
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_db_id(interaction.guild_id, db_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
-        event = record["event"]
-        role_ids = list(event.get("allowed_role_ids") or [])
-        user_ids = list(event.get("allowed_user_ids") or [])
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
+    if not record:
+        await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
+        return
+    event = record["event"]
+    role_ids = list(event.get("allowed_role_ids") or [])
+    user_ids = list(event.get("allowed_user_ids") or [])
 
-        if role is not None and role.id not in role_ids:
-            role_ids.append(role.id)
-            changes.append(f"+ role {role.mention}")
-        if user is not None and user.id not in user_ids:
-            user_ids.append(user.id)
-            changes.append(f"+ user {user.mention}")
-
-        if not changes:
-            await interaction.response.send_message(t("roles.no_changes", lang), ephemeral=True)
-            return
-
-        event["allowed_role_ids"] = role_ids
-        event["allowed_user_ids"] = user_ids
-        db.save_event(record["db_id"], event)
-
-    await interaction.response.send_message(
-        t("roles.added", lang, changes="\n".join(changes)),
-        ephemeral=True,
-        allowed_mentions=discord.AllowedMentions.none(),
+    view = EventGateEditView(db_id, role_ids, user_ids, lang)
+    embed = discord.Embed(
+        title=t("roles.picker_title", lang),
+        description=t("roles.picker_desc", lang, db_id=db_id),
+        color=discord.Color.blurple(),
     )
-    await send_to_log_channel(
-        f"Allow-list updated by {interaction.user.display_name}: {', '.join(changes)}",
-        guild_id=interaction.guild_id,
+    await interaction.response.send_message(
+        embed=embed, view=view, ephemeral=True,
     )
 
 

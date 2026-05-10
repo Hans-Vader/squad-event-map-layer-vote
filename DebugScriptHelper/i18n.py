@@ -488,17 +488,33 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
 
     # ── /set_event_roles & /clear_event_roles ─────────────────────────────
-    "roles.no_args": {
-        "de": "Gib mindestens eine Rolle oder einen Nutzer an.",
-        "en": "Please provide at least one role or user.",
+    "roles.picker_title": {
+        "de": "Erlaubte Rollen/Nutzer für dieses Event",
+        "en": "Allowed roles/users for this event",
     },
-    "roles.added": {
-        "de": "Allow-Liste aktualisiert:\n{changes}",
-        "en": "Allow-list updated:\n{changes}",
+    "roles.picker_desc": {
+        "de": (
+            "Wähle die Rollen und Nutzer, die teilnehmen dürfen, dann **Speichern**. "
+            "Leere Auswahl = Event offen für alle. Aktuelle Auswahl ist vorausgewählt. "
+            "(Event #{db_id})"
+        ),
+        "en": (
+            "Pick the roles and users allowed to participate, then **Save**. "
+            "Leaving the selection empty makes the event open to everyone. "
+            "The current allow-list is pre-selected. (Event #{db_id})"
+        ),
     },
-    "roles.no_changes": {
-        "de": "Keine Änderungen — die angegebenen Einträge sind bereits in der Allow-Liste.",
-        "en": "No changes — the entries you provided are already on the allow-list.",
+    "roles.picker_placeholder": {
+        "de": "Rollen/Nutzer auswählen",
+        "en": "Select roles/users",
+    },
+    "roles.picker_submit": {
+        "de": "Speichern",
+        "en": "Save",
+    },
+    "roles.replaced": {
+        "de": "Allow-Liste gesetzt: {entries}",
+        "en": "Allow-list set to: {entries}",
     },
     "roles.cleared": {
         "de": "Allow-Liste geleert. Das Event ist jetzt offen für alle.",
@@ -825,15 +841,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     "edit.gate_redirect": {
         "de": (
             "Discord-Rollen/Nutzer-Auswahlen funktionieren nicht in DMs. "
-            "Führe in {channel} einen der folgenden Befehle aus:\n"
-            "• `/set_event_roles event_id:{db_id} role:@Rolle user:@Nutzer` — fügt Einträge hinzu\n"
-            "• `/clear_event_roles event_id:{db_id}` — leert die Allow-Liste"
+            "Führe in {channel} aus:\n"
+            "• `/set_event_roles event_id:{db_id}` — öffnet einen Mehrfach-Picker für Rollen + Nutzer\n"
+            "• `/clear_event_roles event_id:{db_id}` — leert die Allow-Liste in einem Klick"
         ),
         "en": (
-            "Discord role/user pickers don't work inside DMs. Run one of the "
-            "following in {channel}:\n"
-            "• `/set_event_roles event_id:{db_id} role:@Role user:@User` — add entries\n"
-            "• `/clear_event_roles event_id:{db_id}` — clear the allow-list"
+            "Discord role/user pickers don't work inside DMs. In {channel} run:\n"
+            "• `/set_event_roles event_id:{db_id}` — opens a multi-select picker for roles + users\n"
+            "• `/clear_event_roles event_id:{db_id}` — clears the allow-list in one shot"
         ),
     },
     "edit.gate_redirect_button": {
