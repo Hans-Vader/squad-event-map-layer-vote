@@ -196,56 +196,20 @@ async def check_organizer(interaction: discord.Interaction, settings: dict) -> b
 
 
 async def _resolve_channel_event(interaction: discord.Interaction,
-                                 lang: str,
-                                 db_id_override: Optional[int] = None) -> Optional[int]:
+                                 lang: str) -> Optional[int]:
     """For slash commands acting on "the event in this channel": return the
     db_id when exactly one active event lives here. Replies with an error and
     returns None when there are zero (or multiple) — multi-event channels
-    must be addressed via the embed buttons or via an explicit `db_id_override`
-    (which the gate slash commands plumb through from their `event_id` param).
+    must be addressed via the embed buttons, which carry db_id explicitly.
     """
     events = db.get_active_events_in_channel(interaction.guild_id, interaction.channel_id)
     if not events:
-        await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-        return None
-    if db_id_override is not None:
-        # The override must point at an active event in *this* channel — the
-        # autocomplete only offers same-channel events, so a mismatch means
-        # the user typed a stale or copy-pasted ID.
-        if any(e["db_id"] == db_id_override for e in events):
-            return db_id_override
         await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
         return None
     if len(events) > 1:
         await interaction.response.send_message(t("event.multiple_in_channel", lang), ephemeral=True)
         return None
     return events[0]["db_id"]
-
-
-async def _event_id_autocomplete(interaction: discord.Interaction,
-                                 current: str) -> list[app_commands.Choice[int]]:
-    """Autocomplete helper for the `event_id` parameter on gate slash commands.
-
-    Lists active events in the current channel as `#<db_id> — starts <time>`
-    so admins can disambiguate when the channel hosts more than one. Discord
-    caps autocomplete responses at 25 entries.
-    """
-    if interaction.guild_id is None or interaction.channel_id is None:
-        return []
-    events = db.get_active_events_in_channel(interaction.guild_id, interaction.channel_id)
-    needle = (current or "").strip().lower()
-    choices: list[app_commands.Choice[int]] = []
-    for entry in events:
-        db_id = entry["db_id"]
-        sst = entry["event"].get("suggestion_start_time")
-        when = sst.strftime("%d.%m %H:%M") if isinstance(sst, datetime) else "manual"
-        label = f"#{db_id} — starts {when}"
-        if needle and needle not in label.lower() and needle not in str(db_id):
-            continue
-        choices.append(app_commands.Choice(name=label[:100], value=db_id))
-        if len(choices) >= 25:
-            break
-    return choices
 
 
 async def check_admin(interaction: discord.Interaction) -> bool:
@@ -1702,6 +1666,13 @@ class AdminPanelView(ui.View):
         self.add_item(AdminButton("edit_event", t("admin.edit_event", lang),
                                   discord.ButtonStyle.primary, "✏️"))
 
+        # Allow-list picker — opens an ephemeral MentionableSelect (multi-select)
+        # right here in the guild, since auto-populated role/user pickers don't
+        # work in DMs (which is why `edit_event` redirects here for that field).
+        self.add_item(AdminButton("set_event_roles",
+                                  t("admin.set_event_roles", lang),
+                                  discord.ButtonStyle.primary, "🔐"))
+
         self.add_item(AdminButton("delete_event", t("admin.delete_event", lang), discord.ButtonStyle.danger, "🗑️"))
 
 
@@ -1730,6 +1701,8 @@ class AdminButton(ui.Button):
             await admin_remove_suggestion(interaction, db_id)
         elif self.action == "edit_event":
             await admin_edit_event(interaction, db_id)
+        elif self.action == "set_event_roles":
+            await admin_set_event_roles(interaction, db_id)
         elif self.action == "delete_event":
             await admin_delete_event(interaction, db_id)
 
@@ -2897,6 +2870,39 @@ def _build_edit_main_embed(event: dict, guild_id: int, lang: str,
     return embed
 
 
+async def admin_set_event_roles(interaction: discord.Interaction, db_id: int):
+    """Open the role/user allow-list picker ephemerally for this event.
+
+    Triggered by the Admin panel's "Edit Allow-list" button — the only entry
+    point now that the standalone slash commands are gone. The Admin panel
+    is itself organizer-gated (check_organizer at bot.py:1648), so this
+    inherits the same auth.
+    """
+    settings = db.get_guild_settings(interaction.guild_id) or {}
+    lang = settings.get("language", "en")
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
+    if not record:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang),
+                                color=discord.Color.red()),
+            view=None,
+        )
+        return
+
+    event = record["event"]
+    role_ids = list(event.get("allowed_role_ids") or [])
+    user_ids = list(event.get("allowed_user_ids") or [])
+
+    view = EventGateEditView(db_id, role_ids, user_ids, lang)
+    embed = discord.Embed(
+        title=t("roles.picker_title", lang),
+        description=t("roles.picker_desc", lang, db_id=db_id),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.edit_message(embed=embed, view=view)
+
+
 async def admin_edit_event(interaction: discord.Interaction, db_id: int):
     """Kick off a DM edit session for this event. Triggered by Admin → Edit."""
     user = interaction.user
@@ -3530,12 +3536,11 @@ def _build_gate_redirect_embed(db_id: int, guild_id: int,
     """Embed shown when the admin selects "Allowed roles/users" in the DM.
 
     The actual editing has to happen in a guild context (Discord auto-populated
-    role/user selects don't work in DMs). The embed spells out the exact slash
-    commands with the current event_id baked in.
+    role/user selects don't work in DMs), so the embed points the admin back
+    at the event embed's Admin → Edit Allow-list button.
     """
     channel_mention = f"<#{channel_id}>" if channel_id else "the event channel"
-    body = t("edit.gate_redirect", lang,
-             db_id=db_id, channel=channel_mention)
+    body = t("edit.gate_redirect", lang, channel=channel_mention)
     return discord.Embed(
         title=t("edit.prop.gate", lang),
         description=body,
@@ -3547,8 +3552,9 @@ class EditGateRedirectView(ui.View):
     """DM-side entry point for editing the role/user allow-list.
 
     The view itself only carries navigation: a deep-link button to the event
-    channel and a Back button. The real picker lives behind /set_event_roles
-    in the guild — see the explanation in `_build_gate_redirect_embed`.
+    channel and a Back button. The real picker lives behind the Admin panel's
+    "Edit Allow-list" button on the public event embed — see the explanation
+    in `_build_gate_redirect_embed`.
     """
 
     def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
@@ -4473,10 +4479,10 @@ async def cmd_delete_event(interaction: discord.Interaction):
 class EventGateEditView(ui.View):
     """Ephemeral multi-select picker for the per-event role/user allow-list.
 
-    Opened by /set_event_roles. The MentionableSelect is multi-select (Discord
-    slash-command parameters are single-value only, so multi-edit has to live
-    in a follow-up component). Submit REPLACES the allow-list — it is the
-    canonical view of the current state, not an additive form.
+    Opened by the Admin panel's "Edit Allow-list" button (admin_set_event_roles).
+    The MentionableSelect is multi-select; Submit REPLACES the allow-list — it
+    is the canonical view of the current state, not an additive form. Empty
+    submit clears the allow-list (event becomes open to everyone).
     """
 
     def __init__(self, db_id: int, role_ids: list[int], user_ids: list[int],
@@ -4584,90 +4590,6 @@ class EventGateEditView(ui.View):
             content=t("general.cancelled", self.lang),
             embed=None, view=None,
         )
-
-
-@bot.tree.command(
-    name="set_event_roles",
-    description="Open the role/user allow-list picker for an event in this channel",
-)
-@app_commands.describe(
-    event_id="Database ID of the event to modify — required when this channel hosts more than one event.",
-)
-@app_commands.autocomplete(event_id=_event_id_autocomplete)
-async def cmd_set_event_roles(interaction: discord.Interaction,
-                              event_id: int = None):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-
-    db_id = await _resolve_channel_event(interaction, lang, db_id_override=event_id)
-    if db_id is None:
-        return
-
-    record = db.get_event_by_db_id(interaction.guild_id, db_id)
-    if not record:
-        await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-        return
-    event = record["event"]
-    role_ids = list(event.get("allowed_role_ids") or [])
-    user_ids = list(event.get("allowed_user_ids") or [])
-
-    view = EventGateEditView(db_id, role_ids, user_ids, lang)
-    embed = discord.Embed(
-        title=t("roles.picker_title", lang),
-        description=t("roles.picker_desc", lang, db_id=db_id),
-        color=discord.Color.blurple(),
-    )
-    await interaction.response.send_message(
-        embed=embed, view=view, ephemeral=True,
-    )
-
-
-@bot.tree.command(
-    name="clear_event_roles",
-    description="Clear the role/user allow-list (event becomes open to everyone)",
-)
-@app_commands.describe(
-    event_id="Database ID of the event to modify — required when this channel hosts more than one event.",
-)
-@app_commands.autocomplete(event_id=_event_id_autocomplete)
-async def cmd_clear_event_roles(interaction: discord.Interaction,
-                                event_id: int = None):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
-
-    lang = settings.get("language", "en")
-
-    db_id = await _resolve_channel_event(interaction, lang, db_id_override=event_id)
-    if db_id is None:
-        return
-
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_db_id(interaction.guild_id, db_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
-        event = record["event"]
-        if not (event.get("allowed_role_ids") or event.get("allowed_user_ids")):
-            await interaction.response.send_message(t("roles.already_empty", lang), ephemeral=True)
-            return
-        event["allowed_role_ids"] = []
-        event["allowed_user_ids"] = []
-        db.save_event(record["db_id"], event)
-
-    await interaction.response.send_message(t("roles.cleared", lang), ephemeral=True)
-    await send_to_log_channel(
-        f"Event allow-list cleared by {interaction.user.display_name}",
-        guild_id=interaction.guild_id,
-    )
 
 
 @bot.tree.command(name="update", description="Refresh the event embed (organizer only)")

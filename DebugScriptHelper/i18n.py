@@ -487,7 +487,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "🗳️ Eligible members can vote here.",
     },
 
-    # ── /set_event_roles & /clear_event_roles ─────────────────────────────
+    # ── Admin → Edit Allow-list (per-event role/user picker) ──────────────
     "roles.picker_title": {
         "de": "Erlaubte Rollen/Nutzer für dieses Event",
         "en": "Allowed roles/users for this event",
@@ -519,10 +519,6 @@ _STRINGS: dict[str, dict[str, str]] = {
     "roles.cleared": {
         "de": "Allow-Liste geleert. Das Event ist jetzt offen für alle.",
         "en": "Allow-list cleared. The event is now open to everyone.",
-    },
-    "roles.already_empty": {
-        "de": "Die Allow-Liste ist bereits leer.",
-        "en": "The allow-list is already empty.",
     },
 
     # ── Event creation wizard (Modal + Confirm view) ──────────────────────
@@ -716,6 +712,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Event bearbeiten",
         "en": "Edit Event",
     },
+    "admin.set_event_roles": {
+        "de": "Rollen/Nutzer",
+        "en": "Edit Allow-list",
+    },
     "admin.random_count_label": {
         "de": "Anzahl zufälliger Layers",
         "en": "Number of random layers",
@@ -841,14 +841,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     "edit.gate_redirect": {
         "de": (
             "Discord-Rollen/Nutzer-Auswahlen funktionieren nicht in DMs. "
-            "Führe in {channel} aus:\n"
-            "• `/set_event_roles event_id:{db_id}` — öffnet einen Mehrfach-Picker für Rollen + Nutzer\n"
-            "• `/clear_event_roles event_id:{db_id}` — leert die Allow-Liste in einem Klick"
+            "Öffne in {channel} das Event-Embed → **Admin** → **Rollen/Nutzer**, "
+            "um den Mehrfach-Picker zu öffnen. Leere Auswahl = Event offen für alle."
         ),
         "en": (
-            "Discord role/user pickers don't work inside DMs. In {channel} run:\n"
-            "• `/set_event_roles event_id:{db_id}` — opens a multi-select picker for roles + users\n"
-            "• `/clear_event_roles event_id:{db_id}` — clears the allow-list in one shot"
+            "Discord role/user pickers don't work inside DMs. On the event "
+            "embed in {channel} click **Admin → Edit Allow-list** to open the "
+            "multi-select picker. An empty selection clears the allow-list."
         ),
     },
     "edit.gate_redirect_button": {
