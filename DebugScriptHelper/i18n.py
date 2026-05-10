@@ -487,26 +487,38 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "🗳️ Eligible members can vote here.",
     },
 
-    # ── /set_event_roles & /clear_event_roles ─────────────────────────────
-    "roles.no_args": {
-        "de": "Gib mindestens eine Rolle oder einen Nutzer an.",
-        "en": "Please provide at least one role or user.",
+    # ── Admin → Edit Allow-list (per-event role/user picker) ──────────────
+    "roles.picker_title": {
+        "de": "Erlaubte Rollen/Nutzer für dieses Event",
+        "en": "Allowed roles/users for this event",
     },
-    "roles.added": {
-        "de": "Allow-Liste aktualisiert:\n{changes}",
-        "en": "Allow-list updated:\n{changes}",
+    "roles.picker_desc": {
+        "de": (
+            "Wähle die Rollen und Nutzer, die teilnehmen dürfen, dann **Speichern**. "
+            "Leere Auswahl = Event offen für alle. Aktuelle Auswahl ist vorausgewählt. "
+            "(Event #{db_id})"
+        ),
+        "en": (
+            "Pick the roles and users allowed to participate, then **Save**. "
+            "Leaving the selection empty makes the event open to everyone. "
+            "The current allow-list is pre-selected. (Event #{db_id})"
+        ),
     },
-    "roles.no_changes": {
-        "de": "Keine Änderungen — die angegebenen Einträge sind bereits in der Allow-Liste.",
-        "en": "No changes — the entries you provided are already on the allow-list.",
+    "roles.picker_placeholder": {
+        "de": "Rollen/Nutzer auswählen",
+        "en": "Select roles/users",
+    },
+    "roles.picker_submit": {
+        "de": "Speichern",
+        "en": "Save",
+    },
+    "roles.replaced": {
+        "de": "Allow-Liste gesetzt: {entries}",
+        "en": "Allow-list set to: {entries}",
     },
     "roles.cleared": {
         "de": "Allow-Liste geleert. Das Event ist jetzt offen für alle.",
         "en": "Allow-list cleared. The event is now open to everyone.",
-    },
-    "roles.already_empty": {
-        "de": "Die Allow-Liste ist bereits leer.",
-        "en": "The allow-list is already empty.",
     },
 
     # ── Event creation wizard (Modal + Confirm view) ──────────────────────
@@ -700,6 +712,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Event bearbeiten",
         "en": "Edit Event",
     },
+    "admin.set_event_roles": {
+        "de": "Rollen/Nutzer",
+        "en": "Edit Allow-list",
+    },
     "admin.random_count_label": {
         "de": "Anzahl zufälliger Layers",
         "en": "Number of random layers",
@@ -810,6 +826,34 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Aktuell: `{current}`. Klicke ⌨️, um einen neuen Wert einzugeben (z.B. `60`, `2h`, `1d`).",
         "en": "Current: `{current}`. Click ⌨️ to enter a new value (e.g. `60`, `2h`, `1d`).",
     },
+    "edit.datetime_prompt": {
+        "de": "Aktuell: `{current}`. Klicke ⌨️, um einen neuen Wert im Format `DD.MM.YYYY HH:MM` einzugeben — leer lassen für „manuell starten“.",
+        "en": "Current: `{current}`. Click ⌨️ to enter a new value as `DD.MM.YYYY HH:MM` — leave blank for manual start.",
+    },
+    "edit.invalid_datetime": {
+        "de": "Ungültiges Datum/Uhrzeit: `{value}`. Erwartetes Format: `DD.MM.YYYY HH:MM`.",
+        "en": "Invalid date/time: `{value}`. Expected format: `DD.MM.YYYY HH:MM`.",
+    },
+    "edit.locked_phase": {
+        "de": "Diese Eigenschaft kann nicht mehr geändert werden — die Vorschlagsphase hat bereits begonnen.",
+        "en": "This property can no longer be edited — the suggestion phase has already started.",
+    },
+    "edit.gate_redirect": {
+        "de": (
+            "Discord-Rollen/Nutzer-Auswahlen funktionieren nicht in DMs. "
+            "Öffne in {channel} das Event-Embed → **Admin** → **Rollen/Nutzer**, "
+            "um den Mehrfach-Picker zu öffnen. Leere Auswahl = Event offen für alle."
+        ),
+        "en": (
+            "Discord role/user pickers don't work inside DMs. On the event "
+            "embed in {channel} click **Admin → Edit Allow-list** to open the "
+            "multi-select picker. An empty selection clears the allow-list."
+        ),
+    },
+    "edit.gate_redirect_button": {
+        "de": "Zum Event-Kanal",
+        "en": "Open event channel",
+    },
     "edit.open_input": {
         "de": "Wert eingeben",
         "en": "Enter value",
@@ -879,6 +923,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     "edit.prop.suggestion_duration": {
         "de": "Vorschlagsphasen-Dauer",
         "en": "Suggestion Phase Duration",
+    },
+    "edit.prop.suggestion_start_time": {
+        "de": "Vorschlagsphase Startzeit",
+        "en": "Suggestion Phase Start Time",
+    },
+    "edit.prop.gate": {
+        "de": "Erlaubte Rollen/Nutzer",
+        "en": "Allowed Roles/Users",
     },
 }
 

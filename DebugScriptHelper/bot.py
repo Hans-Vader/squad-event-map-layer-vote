@@ -1666,6 +1666,13 @@ class AdminPanelView(ui.View):
         self.add_item(AdminButton("edit_event", t("admin.edit_event", lang),
                                   discord.ButtonStyle.primary, "✏️"))
 
+        # Allow-list picker — opens an ephemeral MentionableSelect (multi-select)
+        # right here in the guild, since auto-populated role/user pickers don't
+        # work in DMs (which is why `edit_event` redirects here for that field).
+        self.add_item(AdminButton("set_event_roles",
+                                  t("admin.set_event_roles", lang),
+                                  discord.ButtonStyle.primary, "🔐"))
+
         self.add_item(AdminButton("delete_event", t("admin.delete_event", lang), discord.ButtonStyle.danger, "🗑️"))
 
 
@@ -1694,6 +1701,8 @@ class AdminButton(ui.Button):
             await admin_remove_suggestion(interaction, db_id)
         elif self.action == "edit_event":
             await admin_edit_event(interaction, db_id)
+        elif self.action == "set_event_roles":
+            await admin_set_event_roles(interaction, db_id)
         elif self.action == "delete_event":
             await admin_delete_event(interaction, db_id)
 
@@ -2748,6 +2757,13 @@ def _format_property_value(value, kind: str) -> str:
             return "—"
         # value is stored as hours; reuse the seconds formatter for consistency.
         return _format_duration_seconds(int(value) * 3600)
+    if kind == "datetime":
+        if not value:
+            return "—"
+        try:
+            return value.strftime("%d.%m.%Y %H:%M")
+        except AttributeError:
+            return str(value)
     if value is None:
         return "—"
     return str(value)
@@ -2785,6 +2801,11 @@ _EDIT_PROPERTIES: list[dict] = [
     {"key": "max_voting_layers",         "label_key": "edit.prop.max_voting_layers",     "kind": "int",      "target": "event",  "min": 1,  "max": 10},
     {"key": "allow_multiple_votes",      "label_key": "edit.prop.allow_multiple_votes",  "kind": "bool",     "target": "event"},
     {"key": "suggestion_duration_seconds", "label_key": "edit.prop.suggestion_duration", "kind": "duration", "target": "event"},
+    {"key": "suggestion_start_time",     "label_key": "edit.prop.suggestion_start_time", "kind": "datetime", "target": "event"},
+    # Read-only entry — clicking it opens a redirect to the gate slash commands,
+    # which must run in a guild context (Discord auto-populated MentionableSelect
+    # menus do not work inside DMs).
+    {"key": "_event_gate",               "label_key": "edit.prop.gate",                  "kind": "external", "target": "event"},
 ]
 
 
@@ -2792,7 +2813,31 @@ def _find_edit_property(key: str) -> Optional[dict]:
     return next((p for p in _EDIT_PROPERTIES if p["key"] == key), None)
 
 
-def _build_edit_main_embed(event: dict, lang: str,
+def _format_gate_display(event: dict, guild_id: int, lang: str) -> str:
+    """Render `allowed_role_ids` + `allowed_user_ids` as resolved mentions.
+
+    Falls back to raw `<@&id>` / `<@id>` strings when the bot's cache hasn't
+    seen the guild yet — Discord still renders those as proper mentions, just
+    without our pre-resolved label, and `allowed_mentions=none()` on the DM
+    keeps them from pinging anyone.
+    """
+    role_ids = list(event.get("allowed_role_ids") or [])
+    user_ids = list(event.get("allowed_user_ids") or [])
+    if not role_ids and not user_ids:
+        return "—"
+
+    guild = bot.get_guild(guild_id)
+    parts: list[str] = []
+    for rid in role_ids:
+        role = guild.get_role(rid) if guild else None
+        parts.append(role.mention if role else f"<@&{rid}>")
+    for uid in user_ids:
+        member = guild.get_member(uid) if guild else None
+        parts.append(member.mention if member else f"<@{uid}>")
+    return ", ".join(parts)
+
+
+def _build_edit_main_embed(event: dict, guild_id: int, lang: str,
                            updated_label: Optional[str] = None) -> discord.Embed:
     """Property overview embed shown at the top of every DM dialog state."""
     embed = discord.Embed(
@@ -2801,6 +2846,14 @@ def _build_edit_main_embed(event: dict, lang: str,
         color=discord.Color.blurple(),
     )
     for prop in _EDIT_PROPERTIES:
+        if prop["kind"] == "external" and prop["key"] == "_event_gate":
+            display = _format_gate_display(event, guild_id, lang)
+            embed.add_field(
+                name=t(prop["label_key"], lang),
+                value=display if display == "—" else display[:1024],
+                inline=True,
+            )
+            continue
         value = _read_event_property(event, prop["key"], prop["target"])
         formatted = _format_property_value(value, prop["kind"])
         embed.add_field(
@@ -2815,6 +2868,39 @@ def _build_edit_main_embed(event: dict, lang: str,
             inline=False,
         )
     return embed
+
+
+async def admin_set_event_roles(interaction: discord.Interaction, db_id: int):
+    """Open the role/user allow-list picker ephemerally for this event.
+
+    Triggered by the Admin panel's "Edit Allow-list" button — the only entry
+    point now that the standalone slash commands are gone. The Admin panel
+    is itself organizer-gated (check_organizer at bot.py:1648), so this
+    inherits the same auth.
+    """
+    settings = db.get_guild_settings(interaction.guild_id) or {}
+    lang = settings.get("language", "en")
+
+    record = db.get_event_by_db_id(interaction.guild_id, db_id)
+    if not record:
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=t("event.no_event", lang),
+                                color=discord.Color.red()),
+            view=None,
+        )
+        return
+
+    event = record["event"]
+    role_ids = list(event.get("allowed_role_ids") or [])
+    user_ids = list(event.get("allowed_user_ids") or [])
+
+    view = EventGateEditView(db_id, role_ids, user_ids, lang)
+    embed = discord.Embed(
+        title=t("roles.picker_title", lang),
+        description=t("roles.picker_desc", lang, db_id=db_id),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.edit_message(embed=embed, view=view)
 
 
 async def admin_edit_event(interaction: discord.Interaction, db_id: int):
@@ -2866,7 +2952,7 @@ async def admin_edit_event(interaction: discord.Interaction, db_id: int):
     }
     _active_edit_sessions[user.id] = session
 
-    embed = _build_edit_main_embed(record["event"], lang)
+    embed = _build_edit_main_embed(record["event"], interaction.guild_id, lang)
     view = EditMainView(user.id, db_id, interaction.guild_id, lang)
     try:
         dm_msg = await dm.send(embed=embed, view=view)
@@ -2993,7 +3079,7 @@ async def _refresh_main_view(interaction: discord.Interaction, user_id: int,
             )
         return
 
-    embed = _build_edit_main_embed(record["event"], lang, updated_label=updated_label)
+    embed = _build_edit_main_embed(record["event"], guild_id, lang, updated_label=updated_label)
     view = EditMainView(user_id, db_id, guild_id, lang)
     _set_active_view(user_id, view)
 
@@ -3089,6 +3175,23 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
     current = _read_event_property(event, prop["key"], prop["target"])
     label = t(prop["label_key"], lang)
 
+    # The suggestion start time is only meaningful before the suggestion phase
+    # has opened — once `phase` advances, the scheduler has already consumed
+    # (or skipped) the timestamp, so editing it would have no effect.
+    if (prop["key"] == "suggestion_start_time"
+            and event.get("phase", "created") != "created"):
+        await _bounce_to_main(interaction, user_id, db_id, guild_id, lang,
+                              t("edit.locked_phase", lang))
+        return
+
+    if prop["kind"] == "external":
+        view = EditGateRedirectView(user_id, db_id, guild_id, lang,
+                                    record.get("channel_id"))
+        _set_active_view(user_id, view)
+        embed = _build_gate_redirect_embed(db_id, guild_id, record.get("channel_id"), lang)
+        await interaction.response.edit_message(embed=embed, view=view)
+        return
+
     if prop["kind"] == "list":
         # Maps and factions blacklists are scoped through the same source →
         # category flow used by the suggest dialog, otherwise a single flat
@@ -3132,13 +3235,16 @@ async def _show_property_editor(interaction: discord.Interaction, user_id: int,
         )
         await interaction.response.edit_message(embed=embed, view=view)
 
-    else:  # int / duration / vote_duration — all go through a Modal
+    else:  # int / duration / vote_duration / datetime — all go through a Modal
         view = EditScalarView(user_id, db_id, guild_id, lang, prop)
         _set_active_view(user_id, view)
         if prop["kind"] == "int":
             desc = t("edit.int_prompt", lang,
                      current=_format_property_value(current, "int"),
                      min=prop.get("min", "—"), max=prop.get("max", "—"))
+        elif prop["kind"] == "datetime":
+            desc = t("edit.datetime_prompt", lang,
+                     current=_format_property_value(current, "datetime"))
         else:
             desc = t("edit.duration_prompt", lang,
                      current=_format_property_value(current, prop["kind"]))
@@ -3310,8 +3416,11 @@ class EditScalarView(ui.View):
         self.add_item(cancel)
 
     async def _on_edit(self, interaction: discord.Interaction):
-        modal = EditScalarModal(self.user_id, self.db_id, self.guild_id,
-                                self.lang, self.prop)
+        modal_cls = (EditDateTimeModal
+                     if self.prop["kind"] == "datetime"
+                     else EditScalarModal)
+        modal = modal_cls(self.user_id, self.db_id, self.guild_id,
+                          self.lang, self.prop)
         await interaction.response.send_modal(modal)
 
     async def _on_cancel(self, interaction: discord.Interaction):
@@ -3320,6 +3429,47 @@ class EditScalarView(ui.View):
 
     async def on_timeout(self):
         await _handle_edit_timeout(self, self.user_id)
+
+
+class EditDateTimeModal(ui.Modal):
+    """Modal for the suggestion_start_time datetime property.
+
+    Empty input clears the timestamp — that's the existing "manual phase"
+    semantics from the creation wizard (bot.py — EventScheduleModal).
+    """
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 prop: dict):
+        super().__init__(title=t(prop["label_key"], lang)[:45])
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+        self.prop = prop
+
+        self.value_input = ui.TextInput(
+            label=t("edit.input_label", lang)[:45],
+            placeholder="DD.MM.YYYY HH:MM",
+            required=False,
+            max_length=20,
+        )
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = (self.value_input.value or "").strip()
+        if not raw:
+            value = None
+        else:
+            try:
+                value = datetime.strptime(raw, "%d.%m.%Y %H:%M")
+            except ValueError:
+                await interaction.response.send_message(
+                    t("edit.invalid_datetime", self.lang, value=raw),
+                    ephemeral=True,
+                )
+                return
+        await _apply_edit(interaction, self.user_id, self.db_id, self.guild_id,
+                          self.lang, self.prop, value, via_modal=True)
 
 
 class EditScalarModal(ui.Modal):
@@ -3378,6 +3528,64 @@ class EditScalarModal(ui.Modal):
 
         await _apply_edit(interaction, self.user_id, self.db_id, self.guild_id,
                           self.lang, self.prop, value, via_modal=True)
+
+
+def _build_gate_redirect_embed(db_id: int, guild_id: int,
+                               channel_id: Optional[int],
+                               lang: str) -> discord.Embed:
+    """Embed shown when the admin selects "Allowed roles/users" in the DM.
+
+    The actual editing has to happen in a guild context (Discord auto-populated
+    role/user selects don't work in DMs), so the embed points the admin back
+    at the event embed's Admin → Edit Allow-list button.
+    """
+    channel_mention = f"<#{channel_id}>" if channel_id else "the event channel"
+    body = t("edit.gate_redirect", lang, channel=channel_mention)
+    return discord.Embed(
+        title=t("edit.prop.gate", lang),
+        description=body,
+        color=discord.Color.blurple(),
+    )
+
+
+class EditGateRedirectView(ui.View):
+    """DM-side entry point for editing the role/user allow-list.
+
+    The view itself only carries navigation: a deep-link button to the event
+    channel and a Back button. The real picker lives behind the Admin panel's
+    "Edit Allow-list" button on the public event embed — see the explanation
+    in `_build_gate_redirect_embed`.
+    """
+
+    def __init__(self, user_id: int, db_id: int, guild_id: int, lang: str,
+                 channel_id: Optional[int]):
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.db_id = db_id
+        self.guild_id = guild_id
+        self.lang = lang
+
+        if channel_id:
+            self.add_item(ui.Button(
+                label=t("edit.gate_redirect_button", lang),
+                style=discord.ButtonStyle.link,
+                url=f"https://discord.com/channels/{guild_id}/{channel_id}",
+                emoji="↗️",
+            ))
+
+        back = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary, emoji="↩️",
+        )
+        back.callback = self._on_back
+        self.add_item(back)
+
+    async def _on_back(self, interaction: discord.Interaction):
+        await _refresh_main_view(interaction, self.user_id, self.db_id,
+                                 self.guild_id, self.lang)
+
+    async def on_timeout(self):
+        await _handle_edit_timeout(self, self.user_id)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -4268,106 +4476,120 @@ async def cmd_delete_event(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(
-    name="set_event_roles",
-    description="Restrict suggesting + voting to specific roles/users for the event in this channel",
-)
-@app_commands.describe(
-    role="Role allowed to participate (suggest + vote). Can be combined with user.",
-    user="User allowed to participate (suggest + vote). Can be combined with role.",
-)
-async def cmd_set_event_roles(interaction: discord.Interaction,
-                              role: discord.Role = None,
-                              user: discord.Member = None):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
+class EventGateEditView(ui.View):
+    """Ephemeral multi-select picker for the per-event role/user allow-list.
 
-    lang = settings.get("language", "en")
+    Opened by the Admin panel's "Edit Allow-list" button (admin_set_event_roles).
+    The MentionableSelect is multi-select; Submit REPLACES the allow-list — it
+    is the canonical view of the current state, not an additive form. Empty
+    submit clears the allow-list (event becomes open to everyone).
+    """
 
-    if role is None and user is None:
-        await interaction.response.send_message(t("roles.no_args", lang), ephemeral=True)
-        return
+    def __init__(self, db_id: int, role_ids: list[int], user_ids: list[int],
+                 lang: str):
+        super().__init__(timeout=300)
+        self.db_id = db_id
+        self.lang = lang
+        self.selected_role_ids: list[int] = list(role_ids)
+        self.selected_user_ids: list[int] = list(user_ids)
 
-    db_id = await _resolve_channel_event(interaction, lang)
-    if db_id is None:
-        return
+        # Pre-populate the picker with the existing allow-list. discord.py
+        # 2.4+ exposes SelectDefaultValue / SelectDefaultValueType for this;
+        # the AttributeError fallback keeps older runtimes from blowing up
+        # at import — they just open with an empty selection.
+        default_values = []
+        try:
+            for rid in role_ids:
+                default_values.append(discord.SelectDefaultValue(
+                    id=rid, type=discord.SelectDefaultValueType.role))
+            for uid in user_ids:
+                default_values.append(discord.SelectDefaultValue(
+                    id=uid, type=discord.SelectDefaultValueType.user))
+        except AttributeError:
+            default_values = []
 
-    changes: list[str] = []
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_db_id(interaction.guild_id, db_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
-        event = record["event"]
-        role_ids = list(event.get("allowed_role_ids") or [])
-        user_ids = list(event.get("allowed_user_ids") or [])
+        gate_kwargs = dict(
+            placeholder=t("roles.picker_placeholder", lang),
+            min_values=0,
+            max_values=25,
+            row=0,
+        )
+        if default_values:
+            gate_kwargs["default_values"] = default_values
 
-        if role is not None and role.id not in role_ids:
-            role_ids.append(role.id)
-            changes.append(f"+ role {role.mention}")
-        if user is not None and user.id not in user_ids:
-            user_ids.append(user.id)
-            changes.append(f"+ user {user.mention}")
+        self.gate_select = ui.MentionableSelect(**gate_kwargs)
+        self.gate_select.callback = self._on_select
+        self.add_item(self.gate_select)
 
-        if not changes:
-            await interaction.response.send_message(t("roles.no_changes", lang), ephemeral=True)
-            return
+        submit = ui.Button(
+            label=t("roles.picker_submit", lang),
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            row=1,
+        )
+        submit.callback = self._on_submit
+        self.add_item(submit)
 
-        event["allowed_role_ids"] = role_ids
-        event["allowed_user_ids"] = user_ids
-        db.save_event(record["db_id"], event)
+        cancel = ui.Button(
+            label=t("general.cancel", lang),
+            style=discord.ButtonStyle.secondary,
+            emoji="↩️",
+            row=1,
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
 
-    await interaction.response.send_message(
-        t("roles.added", lang, changes="\n".join(changes)),
-        ephemeral=True,
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
-    await send_to_log_channel(
-        f"Allow-list updated by {interaction.user.display_name}: {', '.join(changes)}",
-        guild_id=interaction.guild_id,
-    )
+    async def _on_select(self, interaction: discord.Interaction):
+        roles: list[int] = []
+        users: list[int] = []
+        for v in self.gate_select.values:
+            if isinstance(v, discord.Role):
+                roles.append(v.id)
+            else:
+                users.append(v.id)
+        self.selected_role_ids = roles
+        self.selected_user_ids = users
+        await interaction.response.defer()
 
+    async def _on_submit(self, interaction: discord.Interaction):
+        lock = _get_guild_lock(interaction.guild_id)
+        async with lock:
+            record = db.get_event_by_db_id(interaction.guild_id, self.db_id)
+            if not record:
+                await interaction.response.edit_message(
+                    content=t("event.no_event", self.lang),
+                    embed=None, view=None,
+                )
+                return
+            event = record["event"]
+            event["allowed_role_ids"] = list(self.selected_role_ids)
+            event["allowed_user_ids"] = list(self.selected_user_ids)
+            db.save_event(record["db_id"], event)
 
-@bot.tree.command(
-    name="clear_event_roles",
-    description="Clear the role/user allow-list (event becomes open to everyone)",
-)
-async def cmd_clear_event_roles(interaction: discord.Interaction):
-    settings = await check_guild_configured(interaction)
-    if not settings:
-        return
-    if not await check_organizer(interaction, settings):
-        return
+        if not self.selected_role_ids and not self.selected_user_ids:
+            content = t("roles.cleared", self.lang)
+        else:
+            mentions = (
+                [f"<@&{rid}>" for rid in self.selected_role_ids]
+                + [f"<@{uid}>" for uid in self.selected_user_ids]
+            )
+            content = t("roles.replaced", self.lang, entries=", ".join(mentions))
 
-    lang = settings.get("language", "en")
+        await interaction.response.edit_message(
+            content=content, embed=None, view=None,
+        )
+        await _update_event_embed(self.db_id)
+        await send_to_log_channel(
+            f"Allow-list set by {interaction.user.display_name}: "
+            f"{len(self.selected_role_ids)} role(s), {len(self.selected_user_ids)} user(s)",
+            guild_id=interaction.guild_id,
+        )
 
-    db_id = await _resolve_channel_event(interaction, lang)
-    if db_id is None:
-        return
-
-    lock = _get_guild_lock(interaction.guild_id)
-    async with lock:
-        record = db.get_event_by_db_id(interaction.guild_id, db_id)
-        if not record:
-            await interaction.response.send_message(t("event.no_event", lang), ephemeral=True)
-            return
-        event = record["event"]
-        if not (event.get("allowed_role_ids") or event.get("allowed_user_ids")):
-            await interaction.response.send_message(t("roles.already_empty", lang), ephemeral=True)
-            return
-        event["allowed_role_ids"] = []
-        event["allowed_user_ids"] = []
-        db.save_event(record["db_id"], event)
-
-    await interaction.response.send_message(t("roles.cleared", lang), ephemeral=True)
-    await send_to_log_channel(
-        f"Event allow-list cleared by {interaction.user.display_name}",
-        guild_id=interaction.guild_id,
-    )
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=t("general.cancelled", self.lang),
+            embed=None, view=None,
+        )
 
 
 @bot.tree.command(name="update", description="Refresh the event embed (organizer only)")
